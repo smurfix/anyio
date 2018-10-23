@@ -5,7 +5,7 @@ import trio
 from anyio import (
     create_task_group, sleep, move_on_after, fail_after, open_cancel_scope,
     reset_detected_asynclib)
-from anyio.backends import asyncio
+from anyio._backends import asyncio
 from anyio.exceptions import ExceptionGroup
 
 
@@ -56,6 +56,27 @@ def test_run_natively(run_func, as_coro_obj):
         run_func(testfunc())
     else:
         run_func(testfunc)
+
+
+@pytest.mark.anyio
+async def test_spawn_while_running():
+    async def task_func():
+        await tg.spawn(sleep, 0)
+
+    async with create_task_group() as tg:
+        await tg.spawn(task_func)
+
+
+@pytest.mark.anyio
+async def test_spawn_after_error():
+    with pytest.raises(ZeroDivisionError):
+        async with create_task_group() as tg:
+            a = 1 / 0  # noqa: F841
+
+    with pytest.raises(RuntimeError) as exc:
+        await tg.spawn(sleep, 0)
+
+    exc.match('This task group is not active; no new tasks can be spawned')
 
 
 @pytest.mark.anyio

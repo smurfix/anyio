@@ -1,3 +1,4 @@
+import os
 import socket
 import ssl
 import sys
@@ -10,13 +11,21 @@ from pathlib import Path
 from ssl import SSLContext
 from typing import TypeVar, Callable, Union, Optional, Awaitable, Coroutine, Any, Dict
 
-from .utils import NullAsyncContext
 from .abc import (  # noqa: F401
     IPAddressType, BufferType, CancelScope, DatagramSocket, Lock, Condition, Event, Semaphore,
-    Queue, TaskGroup, Socket, Stream, SocketStreamServer, SocketStream, AsyncFile)
+    Queue, TaskGroup, Stream, SocketStreamServer, SocketStream, AsyncFile)
+from . import _networking
 
 T_Retval = TypeVar('T_Retval', covariant=True)
 _local = threading.local()
+
+
+class NullAsyncContext:
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        pass
 
 
 @contextmanager
@@ -49,7 +58,7 @@ def detect_running_asynclib() -> Optional[str]:
             return 'curio'
 
     if 'asyncio' in sys.modules:
-        from .backends.asyncio import get_running_loop
+        from ._backends.asyncio import get_running_loop
         try:
             get_running_loop()
         except RuntimeError:
@@ -68,7 +77,7 @@ def _get_asynclib():
         if asynclib_name is None:
             raise LookupError('Cannot find any running async event loop')
 
-        _local.asynclib = import_module('{}.backends.{}'.format(__name__, asynclib_name))
+        _local.asynclib = import_module('{}._backends.{}'.format(__name__, asynclib_name))
         return _local.asynclib
 
 
@@ -94,7 +103,7 @@ def run(func: Callable[..., Coroutine[Any, Any, T_Retval]], *args,
         raise RuntimeError('Already running {} in this thread'.format(asynclib_name))
 
     try:
-        asynclib = import_module('{}.backends.{}'.format(__name__, backend))
+        asynclib = import_module('{}._backends.{}'.format(__name__, backend))
     except ImportError as exc:
         raise LookupError('No such backend: {}'.format(backend)) from exc
 
@@ -243,6 +252,7 @@ def wait_socket_readable(sock: Union[socket.SocketType, ssl.SSLSocket]) -> Await
     Wait until the given socket has data to be read.
 
     :param sock: a socket object
+    :raises anyio.exceptions.ClosedResourceError: if the socket is closed while waiting
 
     """
     return _get_asynclib().wait_socket_readable(sock)
@@ -253,22 +263,24 @@ def wait_socket_writable(sock: Union[socket.SocketType, ssl.SSLSocket]) -> Await
     Wait until the given socket can be written to.
 
     :param sock: a socket object
+    :raises anyio.exceptions.ClosedResourceError: if the socket is closed while waiting
 
     """
     return _get_asynclib().wait_socket_writable(sock)
 
 
 async def connect_tcp(
-    address: IPAddressType, port: int, *, tls: Union[bool, SSLContext] = False,
-    bind_host: Optional[IPAddressType] = None, bind_port: Optional[int] = None
+    address: IPAddressType, port: int, *, ssl_context: Optional[SSLContext] = None,
+    autostart_tls: bool = False, bind_host: Optional[IPAddressType] = None,
+    bind_port: Optional[int] = None
 ) -> SocketStream:
     """
     Connect to a host using the TCP protocol.
 
     :param address: the IP address or host name to connect to
     :param port: port on the target host to connect to
-    :param tls: ``False`` to not do a TLS handshake, ``True`` to do the TLS handshake using a
-        default context, or an SSL context object to use for the TLS handshake
+    :param ssl_context: default SSL context to use for TLS handshakes
+    :param autostart_tls: ``True`` to do a TLS handshake on connect
     :param bind_host: the interface address or name to bind the socket to before connecting
     :param bind_port: the port to bind the socket to before connecting
     :return: an asynchronous context manager that yields a socket stream
@@ -277,8 +289,22 @@ async def connect_tcp(
     if bind_host:
         bind_host = str(bind_host)
 
-    return await _get_asynclib().connect_tcp(str(address), port, tls=tls, bind_host=bind_host,
-                                             bind_port=bind_port)
+    raw_socket = socket.socket()
+    sock = _get_asynclib().Socket(raw_socket)
+    try:
+        if bind_host is not None and bind_port is not None:
+            await sock.bind((bind_host, bind_port))
+
+        await sock.connect((address, port))
+        stream = _networking.SocketStream(sock, ssl_context, address)
+
+        if autostart_tls:
+            await stream.start_tls()
+
+        return stream
+    except BaseException:
+        await sock.close()
+        raise
 
 
 async def connect_unix(path: Union[str, Path]) -> SocketStream:
@@ -291,12 +317,19 @@ async def connect_unix(path: Union[str, Path]) -> SocketStream:
     :return: an asynchronous context manager that yields a socket stream
 
     """
-    return await _get_asynclib().connect_unix(str(path))
+    raw_socket = socket.socket(socket.AF_UNIX)
+    sock = _get_asynclib().Socket(raw_socket)
+    try:
+        await sock.connect(path)
+        return _networking.SocketStream(sock)
+    except BaseException:
+        await sock.close()
+        raise
 
 
 async def create_tcp_server(
     port: int = 0, interface: Optional[IPAddressType] = None,
-    ssl_context: Optional[SSLContext] = None
+    ssl_context: Optional[SSLContext] = None, autostart_tls: bool = True
 ) -> SocketStreamServer:
     """
     Start a TCP socket server.
@@ -304,13 +337,23 @@ async def create_tcp_server(
     :param port: port number to listen on
     :param interface: interface to listen on (if omitted, listen on any interface)
     :param ssl_context: an SSL context object for TLS negotiation
+    :param autostart_tls: automatically do the TLS handshake on new connections if ``ssl_context``
+        has been provided
     :return: an asynchronous context manager that yields a server object
 
     """
     if interface:
         interface = str(interface)
 
-    return await _get_asynclib().create_tcp_server(port, interface, ssl_context=ssl_context)
+    raw_socket = socket.socket()
+    sock = _get_asynclib().Socket(raw_socket)
+    try:
+        await sock.bind((interface or '', port))
+        sock.listen()
+        return _networking.SocketStreamServer(sock, ssl_context, autostart_tls)
+    except BaseException:
+        await sock.close()
+        raise
 
 
 async def create_unix_server(
@@ -325,7 +368,19 @@ async def create_unix_server(
     :return: an asynchronous context manager that yields a server object
 
     """
-    return await _get_asynclib().create_unix_server(str(path), mode=mode)
+    raw_socket = socket.socket(socket.AF_UNIX)
+    sock = _get_asynclib().Socket(raw_socket)
+    try:
+        await sock.bind(path)
+
+        if mode is not None:
+            os.chmod(path, mode)
+
+        sock.listen()
+        return _networking.SocketStreamServer(sock, None, False)
+    except BaseException:
+        await sock.close()
+        raise
 
 
 async def create_udp_socket(
@@ -350,8 +405,19 @@ async def create_udp_socket(
     if target_host:
         target_host = str(target_host)
 
-    return await _get_asynclib().create_udp_socket(
-        bind_host=interface, bind_port=port, target_host=target_host, target_port=target_port)
+    raw_socket = socket.socket(type=socket.SOCK_DGRAM)
+    sock = _get_asynclib().Socket(raw_socket)
+    try:
+        if interface is not None or port is not None:
+            await sock.bind((interface or '', port or 0))
+
+        if target_host is not None and target_port is not None:
+            await sock.connect((target_host, target_port))
+
+        return _networking.DatagramSocket(sock)
+    except BaseException:
+        await sock.close()
+        raise
 
 
 #
@@ -427,3 +493,12 @@ def receive_signals(*signals: int) -> 'typing.ContextManager[typing.AsyncIterato
 
     """
     return _get_asynclib().receive_signals(*signals)
+
+
+#
+# Testing and debugging
+#
+
+async def wait_all_tasks_blocked() -> None:
+    """Wait until all other tasks are waiting for something."""
+    await _get_asynclib().wait_all_tasks_blocked()

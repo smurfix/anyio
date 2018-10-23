@@ -44,7 +44,7 @@ jobs:
         provider: pypi
         user: agronholm
         password:
-          secure: ea7qVNkcX9+f1jHEPDd6LNY/K6Z5P2PpQVNUaBt/4mhtWXaQ0hnM3I8xl5sOSwE2FYomIDiJh1fFn1ybJctq1T+U5Q94oxEcFBc61nHk6y9jUlQPtQfX5yCbs9+AzX3PVRjt6hWf10sHiU5KPCh1NFwo/6nFxzhb5PzEZJsaqQk+I407XKKIine2PGd9gDdQ5oSIPySCUMo0HT5RFyMaRKWLGlIIk7STJ3SIcPWNPNlKPLqZDJxqCL5jKN0ZkpqfLU5OaSR43bzoY9rM9vlxk4hAYLrZIDnWlfvjLpykQGbIKSujMr4AB/phw0ey3HqcZkQ/EKFrg1Hml959HbrCTUnu2Dv0gyTS5jYEgBTGWxQbSW+y1vuihlB5l9Jbkwa4W+9m3SjYEjvOWva/YxkL0/+pj9txc5ib57F6ETb4yUKPddhZDZp7qDbM0EMLLOgb+zt2JP25T48MNMSYZQ1U7EsEqOZQPqyWIsrM7//wXPl+bssgGvTVML5rEo6ykjxz1veqyQ5JXxe4dpvNtDnb/Ol7lSRxYyL6H/Jy8PqMZZfksWO6aFU8yMw86XoOo6aIPb7Odv6t9yXGmeVD3BlXTbeUTbGkloKHkdsb9GReghp+vEssLdVgj5BMKG4yU0I37GXid15I1OahKNeSor7sQv8Nykjfw7gl5mzzAkGErxg=
+          secure: zHprICvuiBq7hVNv7n/a9uyXaNPmYPu+r5YvwBdjt6QlikrCW1ArOSH6/fvySwFRsVXe0KJbqNCCmmoAMWSxo1LtBYU/fsCn5vXfq5D6XJIDBzf4sl2AS0SpqLpsLtnj/3g62NK9lXQfoExrcUuwAPLV84htsKACaNtxCLA8KB+sLtkiePt42j31BuClfzMg9eDaDlyHBrLBFiBYOWrOatprIaEL0FF3Dt6LzeANRvnjkzy3Gvn8/HgUSF1fCLcsqpSm5uopf4zYCBeZpKdUFYd4rCmfz973uJl2z6Jq1Lmyzb6G2ToUnQal59jNrSrMlwo1dKUS1To1Uw6PckGFPnYyoCz3/598TVo6cP/yJl18rN4tN86KhOw+agSOcpQcBVWPcNTvEnxrCnPQGL1SfoWyCWX31cHnZDnTzAC/FeqWWAmrlDv3jEzdyFyGhWZov8OE3unsOO3q8pF+qJd87GYxulJpn4jB2my9VGWx0GFttR09GF7jLUhecnKviwaWo5fFTZc7strUK+Kun9rchxoHhefn8+d96uMm6uVDa+U6h2gNGPY4FEFyMoMn8qYytLHTcIsurWNlEh+I25qBtlQ+n4N85fGDsEtHbRDhA2uJhpONZpIh2Hok8UpjzZps86opbLvDXf07RgyZx1DiF/sYOdMK9LLEbGLlDcxtIG8=
         distributions: sdist bdist_wheel
         on:
           tags: true
@@ -55,10 +55,3 @@ jobs:
 install: pip install tox
 
 script: tox
-
-notifications:
-  irc:
-    channels:
-      - "irc.freenode.net#pypa-dev"
-    use_notice: true
-    skip_join: true
