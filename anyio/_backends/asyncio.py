@@ -225,7 +225,6 @@ async def fail_after(delay: float):
             await yield_(scope)
         except asyncio.CancelledError as exc:
             if timeout_expired:
-                await scope.cancel()
                 raise TimeoutError().with_traceback(exc.__traceback__) from None
             else:
                 raise
@@ -249,9 +248,7 @@ async def move_on_after(delay: float):
         try:
             await yield_(scope)
         except asyncio.CancelledError:
-            if timeout_expired:
-                await scope.cancel()
-            else:
+            if not timeout_expired:
                 raise
         finally:
             timeout_task.cancel()
