@@ -136,45 +136,54 @@ def sleep(delay: float) -> Awaitable[None]:
     return _get_asynclib().sleep(delay)
 
 
-def open_cancel_scope() -> 'typing.AsyncContextManager[CancelScope]':
+def open_cancel_scope(*, shield: bool = False) -> 'typing.AsyncContextManager[CancelScope]':
     """
     Open a cancel scope.
 
-    :return: an asynchronous context manager that yields a cancel scope.
+    :param shield: ``True`` to shield the cancel scope from external cancellation
+    :return: an asynchronous context manager that yields a cancel scope
 
     """
-    return _get_asynclib().open_cancel_scope()
+    return _get_asynclib().open_cancel_scope(shield=shield)
 
 
-def fail_after(delay: Optional[float]) -> 'typing.AsyncContextManager[None]':
+def fail_after(delay: Optional[float], *,
+               shield: bool = False) -> 'typing.AsyncContextManager[CancelScope]':
     """
     Create a context manager which raises an exception if does not finish in time.
 
     :param delay: maximum allowed time (in seconds) before raising the exception, or ``None`` to
         disable the timeout
-    :return: an asynchronous context manager
+    :param shield: ``True`` to shield the cancel scope from external cancellation
+    :return: an asynchronous context manager that yields a cancel scope
     :raises TimeoutError: if the block does not complete within the allotted time
 
     """
     if delay is None:
-        return NullAsyncContext()
+        return _get_asynclib().open_cancel_scope(shield=shield)
     else:
-        return _get_asynclib().fail_after(delay)
+        return _get_asynclib().fail_after(delay, shield=shield)
 
 
-def move_on_after(delay: Optional[float]) -> 'typing.AsyncContextManager[None]':
+def move_on_after(delay: Optional[float], *,
+                  shield: bool = False) -> 'typing.AsyncContextManager[CancelScope]':
     """
     Create a context manager which is exited if it does not complete within the given time.
 
     :param delay: maximum allowed time (in seconds) before exiting the context block, or ``None``
         to disable the timeout
-    :return: an asynchronous context manager
+    :param shield: ``True`` to shield the cancel scope from external cancellation
+    :return: an asynchronous context manager that yields a cancel scope
 
     """
     if delay is None:
-        return NullAsyncContext()
+        return _get_asynclib().open_cancel_scope(shield=shield)
     else:
-        return _get_asynclib().move_on_after(delay)
+        return _get_asynclib().move_on_after(delay, shield=shield)
+
+
+def current_effective_deadline() -> Awaitable[float]:
+    return _get_asynclib().current_effective_deadline()
 
 
 #
@@ -272,7 +281,7 @@ def wait_socket_writable(sock: Union[socket.SocketType, ssl.SSLSocket]) -> Await
 async def connect_tcp(
     address: IPAddressType, port: int, *, ssl_context: Optional[SSLContext] = None,
     autostart_tls: bool = False, bind_host: Optional[IPAddressType] = None,
-    bind_port: Optional[int] = None
+    bind_port: Optional[int] = None, tls_standard_compatible: bool = True
 ) -> SocketStream:
     """
     Connect to a host using the TCP protocol.
@@ -283,6 +292,11 @@ async def connect_tcp(
     :param autostart_tls: ``True`` to do a TLS handshake on connect
     :param bind_host: the interface address or name to bind the socket to before connecting
     :param bind_port: the port to bind the socket to before connecting
+    :param tls_standard_compatible: If ``True``, performs the TLS shutdown handshake before closing
+        the stream and requires that the server does this as well. Otherwise,
+        :exc:`~ssl.SSLEOFError` may be raised during reads from the stream.
+        Some protocols, such as HTTP, require this option to be ``False``.
+        See :meth:`~ssl.SSLContext.wrap_socket` for details.
     :return: an asynchronous context manager that yields a socket stream
 
     """
@@ -292,11 +306,12 @@ async def connect_tcp(
     raw_socket = socket.socket()
     sock = _get_asynclib().Socket(raw_socket)
     try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         if bind_host is not None and bind_port is not None:
             await sock.bind((bind_host, bind_port))
 
         await sock.connect((address, port))
-        stream = _networking.SocketStream(sock, ssl_context, address)
+        stream = _networking.SocketStream(sock, ssl_context, address, tls_standard_compatible)
 
         if autostart_tls:
             await stream.start_tls()
@@ -329,7 +344,8 @@ async def connect_unix(path: Union[str, Path]) -> SocketStream:
 
 async def create_tcp_server(
     port: int = 0, interface: Optional[IPAddressType] = None,
-    ssl_context: Optional[SSLContext] = None, autostart_tls: bool = True
+    ssl_context: Optional[SSLContext] = None, autostart_tls: bool = True,
+    tls_standard_compatible: bool = True,
 ) -> SocketStreamServer:
     """
     Start a TCP socket server.
@@ -339,6 +355,11 @@ async def create_tcp_server(
     :param ssl_context: an SSL context object for TLS negotiation
     :param autostart_tls: automatically do the TLS handshake on new connections if ``ssl_context``
         has been provided
+    :param tls_standard_compatible: If ``True``, performs the TLS shutdown handshake before closing
+        a connected stream and requires that the client does this as well. Otherwise,
+        :exc:`~ssl.SSLEOFError` may be raised during reads from a client stream.
+        Some protocols, such as HTTP, require this option to be ``False``.
+        See :meth:`~ssl.SSLContext.wrap_socket` for details.
     :return: an asynchronous context manager that yields a server object
 
     """
@@ -348,9 +369,15 @@ async def create_tcp_server(
     raw_socket = socket.socket()
     sock = _get_asynclib().Socket(raw_socket)
     try:
+        if sys.platform == 'win32':
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
         await sock.bind((interface or '', port))
         sock.listen()
-        return _networking.SocketStreamServer(sock, ssl_context, autostart_tls)
+        return _networking.SocketStreamServer(sock, ssl_context, autostart_tls,
+                                              tls_standard_compatible)
     except BaseException:
         await sock.close()
         raise
@@ -377,7 +404,7 @@ async def create_unix_server(
             os.chmod(path, mode)
 
         sock.listen()
-        return _networking.SocketStreamServer(sock, None, False)
+        return _networking.SocketStreamServer(sock, None, False, True)
     except BaseException:
         await sock.close()
         raise

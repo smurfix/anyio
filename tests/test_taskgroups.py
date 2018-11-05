@@ -4,7 +4,7 @@ import trio
 
 from anyio import (
     create_task_group, sleep, move_on_after, fail_after, open_cancel_scope,
-    reset_detected_asynclib)
+    reset_detected_asynclib, wait_all_tasks_blocked, current_effective_deadline)
 from anyio._backends import asyncio
 from anyio.exceptions import ExceptionGroup
 
@@ -109,41 +109,45 @@ async def test_edge_cancellation():
     marker = None
     async with create_task_group() as tg:
         await tg.spawn(dummy)
+        assert marker is None
         await tg.cancel_scope.cancel()
 
     assert marker == 1
 
 
-# @pytest.mark.anyio
-# async def test_host_cancelled_before_aexit():
-#     async def set_result(value):
-#         nonlocal result
-#         await sleep(3)
-#         result = value
-#
-#     async def host():
-#         async with create_task_group() as tg:
-#             await tg.spawn(set_result, 'a')
-#
-#     result = None
-#     with pytest.raises(event_loop.CancelledError):
-#         with open_cancel_scope() as scope:
-#             async with create_task_group() as main_group:
-#                 await main_group.spawn(host)
-#                 await sleep(0.1)
-#                 scope.cancel()
-#
-#     assert result is None
+@pytest.mark.anyio
+async def test_failing_child_task_cancels_host():
+    async def child():
+        await wait_all_tasks_blocked()
+        raise Exception('foo')
+
+    sleep_completed = False
+    with pytest.raises(Exception) as exc:
+        async with create_task_group() as tg:
+            await tg.spawn(child)
+            await sleep(0.5)
+            sleep_completed = True
+
+    exc.match('foo')
+    assert not sleep_completed
 
 
-# @pytest.mark.anyio
-# async def test_host_cancelled_during_aexit(event_loop, queue):
-#     with pytest.raises(CancelledError):
-#         async with event_loop.TaskGroup() as tg:
-#             tg.spawn(self.delayed_put, event_loop, queue, 'a')
-#             event_loop.call_soon(asyncio.Task.current_task().cancel)
-#
-#     assert queue.empty()
+@pytest.mark.anyio
+async def test_failing_host_task_cancels_children():
+    async def child():
+        nonlocal sleep_completed
+        await sleep(1)
+        sleep_completed = True
+
+    sleep_completed = False
+    with pytest.raises(Exception) as exc:
+        async with create_task_group() as tg:
+            await tg.spawn(child)
+            await wait_all_tasks_blocked()
+            raise Exception('foo')
+
+    exc.match('foo')
+    assert not sleep_completed
 
 
 @pytest.mark.anyio
@@ -182,7 +186,7 @@ async def test_multi_error_host():
     with pytest.raises(ExceptionGroup) as exc:
         async with create_task_group() as tg:
             await tg.spawn(async_error, 'child', 2)
-            await sleep(0.1)
+            await wait_all_tasks_blocked()
             raise Exception('host')
 
     assert len(exc.value.exceptions) == 2
@@ -197,33 +201,106 @@ async def test_escaping_cancelled_exception():
 
 
 @pytest.mark.anyio
+async def test_cancel_scope_cleared():
+    async with move_on_after(0.1):
+        await sleep(1)
+
+    await sleep(0)
+
+
+@pytest.mark.anyio
 async def test_fail_after():
     with pytest.raises(TimeoutError):
-        async with fail_after(0.1):
+        async with fail_after(0.1) as scope:
             await sleep(1)
+
+    assert scope.cancel_called
 
 
 @pytest.mark.anyio
 async def test_fail_after_no_timeout():
-    async with fail_after(None):
+    async with fail_after(None) as scope:
+        assert scope.deadline == float('inf')
         await sleep(0.1)
+
+    assert not scope.cancel_called
 
 
 @pytest.mark.anyio
 async def test_move_on_after():
     result = False
-    async with move_on_after(0.1):
+    async with move_on_after(0.1) as scope:
         await sleep(1)
         result = True
 
     assert not result
+    assert scope.cancel_called
 
 
 @pytest.mark.anyio
 async def test_move_on_after_no_timeout():
     result = False
-    async with move_on_after(None):
+    async with move_on_after(None) as scope:
+        assert scope.deadline == float('inf')
         await sleep(0.1)
         result = True
 
     assert result
+    assert not scope.cancel_called
+
+
+@pytest.mark.anyio
+async def test_nested_move_on_after():
+    sleep_completed = inner_scope_completed = False
+    async with move_on_after(0.1) as outer_scope:
+        assert await current_effective_deadline() == outer_scope.deadline
+        async with move_on_after(1) as inner_scope:
+            assert await current_effective_deadline() == outer_scope.deadline
+            await sleep(2)
+            sleep_completed = True
+
+        inner_scope_completed = True
+
+    assert not sleep_completed
+    assert not inner_scope_completed
+    assert outer_scope.cancel_called
+    assert not inner_scope.cancel_called
+
+
+@pytest.mark.anyio
+async def test_shielding():
+    async def cancel_when_ready():
+        await wait_all_tasks_blocked()
+        await tg.cancel_scope.cancel()
+
+    inner_sleep_completed = outer_sleep_completed = False
+    async with create_task_group() as tg:
+        await tg.spawn(cancel_when_ready)
+        async with move_on_after(10, shield=True) as inner_scope:
+            assert inner_scope.shield
+            await sleep(0.1)
+            inner_sleep_completed = True
+
+        await sleep(1)
+        outer_sleep_completed = True
+
+    assert inner_sleep_completed
+    assert not outer_sleep_completed
+    assert tg.cancel_scope.cancel_called
+    assert not inner_scope.cancel_called
+
+
+@pytest.mark.anyio
+async def test_shielding_immediate_scope_cancelled():
+    async def cancel_when_ready():
+        await wait_all_tasks_blocked()
+        await scope.cancel()
+
+    sleep_completed = False
+    async with create_task_group() as tg:
+        async with open_cancel_scope(shield=True) as scope:
+            await tg.spawn(cancel_when_ready)
+            await sleep(0.5)
+            sleep_completed = True
+
+    assert not sleep_completed

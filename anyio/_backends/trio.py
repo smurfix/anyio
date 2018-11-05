@@ -26,27 +26,47 @@ sleep = trio.sleep
 
 @asynccontextmanager
 @async_generator
-async def open_cancel_scope():
-    with trio.open_cancel_scope() as cancel_scope:
+async def open_cancel_scope(shield):
+    with trio.open_cancel_scope(shield=shield) as cancel_scope:
         cancel_scope.cancel = wrap_as_awaitable(cancel_scope.cancel)
+        await yield_(cancel_scope)
+
+
+# @asynccontextmanager
+# @async_generator
+# async def shield():
+#     host_task = trio.hazmat.current_task()
+#     if host_task._cancel_stack:
+#         cancel_scope = host_task._cancel_stack[-1]
+#         previous_shield = cancel_scope.shield
+#         cancel_scope.shield = True
+#         await yield_()
+#         cancel_scope.shield = previous_shield
+#     else:
+#         await yield_()
+
+
+@asynccontextmanager
+@async_generator
+async def move_on_after(seconds, shield):
+    with trio.move_on_after(seconds) as cancel_scope:
+        cancel_scope.shield = shield
         await yield_(cancel_scope)
 
 
 @asynccontextmanager
 @async_generator
-async def move_on_after(seconds):
-    with trio.move_on_after(seconds) as s:
-        await yield_(s)
-
-
-@asynccontextmanager
-@async_generator
-async def fail_after(seconds):
+async def fail_after(seconds, shield):
     try:
-        with trio.fail_after(seconds) as s:
-            await yield_(s)
+        with trio.fail_after(seconds) as cancel_scope:
+            cancel_scope.shield = shield
+            await yield_(cancel_scope)
     except trio.TooSlowError as exc:
         raise TimeoutError().with_traceback(exc.__traceback__) from None
+
+
+async def current_effective_deadline():
+    return trio.current_effective_deadline()
 
 
 #

@@ -115,7 +115,30 @@ class TaskGroup(metaclass=ABCMeta):
 class CancelScope(metaclass=ABCMeta):
     @abstractmethod
     async def cancel(self):
-        """Cancel all tasks within this scope."""
+        """Cancel this scope immediately."""
+
+    @property
+    @abstractmethod
+    def deadline(self) -> float:
+        """
+        The time (clock value) when this scope is cancelled automatically.
+
+        Will be ``float('inf')``` if no timeout has been set.
+        """
+
+    @property
+    @abstractmethod
+    def cancel_called(self) -> bool:
+        """Return ``True`` if :meth:`cancel` has been called."""
+
+    @property
+    @abstractmethod
+    def shield(self) -> bool:
+        """
+        Return ``True`` if this scope is shielded from external cancellation.
+
+        While a scope is shielded, it will not receive cancellations from outside.
+        """
 
 
 class AsyncFile(metaclass=ABCMeta):
@@ -239,6 +262,8 @@ class Stream(metaclass=ABCMeta):
 
         :param max_bytes: maximum number of bytes to read
         :return: the bytes read
+        :raises ssl.SSLEOFError: if ``tls_standard_compatible`` was set to ``True`` in a TLS stream
+            and the peer prematurely closed the connection
         """
 
     @abstractmethod
@@ -250,6 +275,8 @@ class Stream(metaclass=ABCMeta):
         :return: the bytes read
         :raises anyio.exceptions.IncompleteRead: if the stream was closed before the requested
             amount of bytes could be read from the stream
+        :raises ssl.SSLEOFError: if ``tls_standard_compatible`` was set to ``True`` in a TLS stream
+            and the peer prematurely closed the connection
         """
 
     @abstractmethod
@@ -265,6 +292,8 @@ class Stream(metaclass=ABCMeta):
             was found
         :raises anyio.exceptions.DelimiterNotFound: if the delimiter is not found within the
             bytes read up to the maximum allowed
+        :raises ssl.SSLEOFError: if ``tls_standard_compatible`` was set to ``True`` in a TLS stream
+            and the peer prematurely closed the connection
         """
 
     @abstractmethod
@@ -276,6 +305,8 @@ class Stream(metaclass=ABCMeta):
 
         :param max_size: maximum number of bytes to return in one iteration
         :return: an async iterable yielding bytes
+        :raises ssl.SSLEOFError: if ``tls_standard_compatible`` was set to ``True`` in a TLS stream
+            and the peer prematurely closed the connection
         """
 
     @abstractmethod
@@ -294,6 +325,8 @@ class Stream(metaclass=ABCMeta):
             was found
         :raises anyio.exceptions.DelimiterNotFound: if the delimiter is not found within the
             bytes read up to the maximum allowed
+        :raises ssl.SSLEOFError: if ``tls_standard_compatible`` was set to ``True`` in a TLS stream
+            and the peer prematurely closed the connection
         """
 
     @abstractmethod
