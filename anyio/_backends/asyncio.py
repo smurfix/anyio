@@ -201,6 +201,11 @@ async def open_cancel_scope():
 
     try:
         await yield_(scope)
+    except asyncio.CancelledError as exc:
+        if timeout_expired:
+            raise TimeoutError().with_traceback(exc.__traceback__) from None
+        elif not scope._cancel_called:
+            raise
     finally:
         if parent_scope is not None:
             parent_scope.children.remove(scope)
