@@ -179,6 +179,8 @@ async def test_multi_error_children():
 
     assert len(exc.value.exceptions) == 2
     assert sorted(str(e) for e in exc.value.exceptions) == ['task1', 'task2']
+    assert exc.match('^2 exceptions were raised in the task group:\n')
+    assert exc.match(r'Exception: task\d\n----')
 
 
 @pytest.mark.anyio
@@ -191,6 +193,8 @@ async def test_multi_error_host():
 
     assert len(exc.value.exceptions) == 2
     assert [str(e) for e in exc.value.exceptions] == ['host', 'child']
+    assert exc.match('^2 exceptions were raised in the task group:\n')
+    assert exc.match(r'Exception: host\n----')
 
 
 @pytest.mark.anyio
@@ -304,3 +308,23 @@ async def test_shielding_immediate_scope_cancelled():
             sleep_completed = True
 
     assert not sleep_completed
+
+
+@pytest.mark.anyio
+async def test_cancel_scope_in_child_task():
+    async def child():
+        nonlocal child_scope
+        async with open_cancel_scope() as child_scope:
+            await sleep(2)
+
+    child_scope = None
+    host_done = False
+    async with create_task_group() as tg:
+        await tg.spawn(child)
+        await wait_all_tasks_blocked()
+        await child_scope.cancel()
+        await sleep(0.1)
+        host_done = True
+
+    assert host_done
+    assert not tg.cancel_scope.cancel_called

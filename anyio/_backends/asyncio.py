@@ -7,7 +7,7 @@ from functools import partial
 from threading import Thread
 from typing import Callable, Set, Optional, Union  # noqa: F401
 
-from async_generator import async_generator, yield_, asynccontextmanager
+from async_generator import async_generator, yield_, asynccontextmanager, aclosing
 
 from .._networking import BaseSocket
 from .. import abc, claim_current_thread, _local, T_Retval
@@ -103,7 +103,7 @@ _create_task_supports_name = 'name' in inspect.signature(create_task).parameters
 
 
 #
-# Main entry point
+# Event loop
 #
 
 def run(func: Callable[..., T_Retval], *args, debug: bool = False,
@@ -124,6 +124,18 @@ def run(func: Callable[..., T_Retval], *args, debug: bool = False,
         raise exception
     else:
         return retval
+
+
+#
+# Miscellaneous
+#
+
+finalize = aclosing
+
+
+async def sleep(delay: float) -> None:
+    check_cancelled()
+    await asyncio.sleep(delay)
 
 
 #
@@ -193,11 +205,6 @@ def check_cancelled():
         raise CancelledError
 
 
-async def sleep(delay: float) -> None:
-    check_cancelled()
-    await asyncio.sleep(delay)
-
-
 @asynccontextmanager
 @async_generator
 async def open_cancel_scope(deadline: float = float('inf'), shield: bool = False):
@@ -221,7 +228,7 @@ async def open_cancel_scope(deadline: float = float('inf'), shield: bool = False
     except asyncio.CancelledError as exc:
         if timeout_expired:
             raise TimeoutError().with_traceback(exc.__traceback__) from None
-        else:
+        elif not scope._cancel_called:
             raise
     finally:
         if timeout_task:
@@ -281,7 +288,9 @@ class TaskGroup:
             await self.cancel_scope.cancel()
             raise
         else:
-            self._tasks.remove(current_task())
+            task = current_task()
+            self._tasks.remove(task)
+            set_cancel_scope(task, None)
 
     async def spawn(self, func: Callable, *args, name=None) -> None:
         if not self._active:
@@ -326,8 +335,10 @@ async def create_task_group():
                     await task
                 except (CancelledError, asyncio.CancelledError):
                     group._tasks.remove(task)
+                    set_cancel_scope(task, None)
                 except BaseException as exc:
                     group._tasks.remove(task)
+                    set_cancel_scope(task, None)
                     exceptions.append(exc)
 
         group._active = False
@@ -442,7 +453,7 @@ async def aopen(*args, **kwargs):
 
 
 #
-# Networking
+# Sockets and networking
 #
 
 
@@ -578,7 +589,7 @@ abc.Queue.register(Queue)
 
 
 #
-# Signal handling
+# Operating system signals
 #
 
 @asynccontextmanager
@@ -593,13 +604,15 @@ async def receive_signals(*signals: int):
     loop = get_running_loop()
     queue = asyncio.Queue(loop=loop)
     handled_signals = set()
+    agen = process_signal_queue()
     try:
         for sig in set(signals):
             loop.add_signal_handler(sig, queue.put_nowait, sig)
             handled_signals.add(sig)
 
-        await yield_(process_signal_queue())
+        await yield_(agen)
     finally:
+        await agen.aclose()
         for sig in handled_signals:
             loop.remove_signal_handler(sig)
 

@@ -30,6 +30,24 @@ class TestTCPStream:
 
         assert response == b'halb'
 
+    @pytest.mark.anyio
+    async def test_receive_some_from_cache(self):
+        async def server():
+            async with await stream_server.accept() as stream:
+                await stream.receive_until(b'a', 10)
+                request = await stream.receive_some(1)
+                await stream.send_all(request + b'\n')
+
+        received = None
+        async with create_task_group() as tg:
+            async with await create_tcp_server(interface='localhost') as stream_server:
+                await tg.spawn(server)
+                async with await connect_tcp('localhost', stream_server.port) as client:
+                    await client.send_all(b'abc')
+                    received = await client.receive_until(b'\n', 3)
+
+        assert received == b'b'
+
     @pytest.mark.parametrize('method_name, params', [
         ('receive_until', [b'\n', 100]),
         ('receive_exactly', [5])
@@ -136,6 +154,33 @@ class TestTCPStream:
                         await client.send_all(chunk)
 
         assert chunks == [b'blah', b'foobar']
+
+    @pytest.mark.anyio
+    async def test_accept_connections(self):
+        async def handle_client(stream):
+            async with stream:
+                line = await stream.receive_until(b'\n', 10)
+                lines.add(line)
+
+            if len(lines) == 2:
+                await stream_server.close()
+
+        async def server():
+            async for stream in stream_server.accept_connections():
+                await tg.spawn(handle_client, stream)
+
+        lines = set()
+        async with await create_tcp_server(interface='localhost') as stream_server:
+            async with create_task_group() as tg:
+                await tg.spawn(server)
+
+                async with await connect_tcp('localhost', stream_server.port) as client:
+                    await client.send_all(b'client1\n')
+
+                async with await connect_tcp('localhost', stream_server.port) as client:
+                    await client.send_all(b'client2\n')
+
+        assert lines == {b'client1', b'client2'}
 
 
 class TestUNIXStream:

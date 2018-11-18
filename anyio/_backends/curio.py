@@ -3,6 +3,7 @@ from functools import partial
 from typing import Callable, Set, Optional, Awaitable  # noqa: F401
 
 import curio.io
+import curio.meta
 import curio.socket
 import curio.ssl
 import curio.traps
@@ -14,7 +15,7 @@ from ..exceptions import ExceptionGroup, CancelledError, ClosedResourceError
 
 
 #
-# Main entry point
+# Event loop
 #
 
 def run(func: Callable[..., T_Retval], *args, **curio_options) -> T_Retval:
@@ -31,6 +32,18 @@ def run(func: Callable[..., T_Retval], *args, **curio_options) -> T_Retval:
         raise exception
     else:
         return retval
+
+
+#
+# Miscellaneous functions
+#
+
+finalize = curio.meta.finalize
+
+
+async def sleep(seconds: int):
+    await check_cancelled()
+    await curio.sleep(seconds)
 
 
 #
@@ -100,11 +113,6 @@ async def check_cancelled():
         raise CancelledError
 
 
-async def sleep(seconds: int):
-    await check_cancelled()
-    await curio.sleep(seconds)
-
-
 @asynccontextmanager
 @async_generator
 async def open_cancel_scope(deadline: float = float('inf'), shield: bool = False):
@@ -128,7 +136,7 @@ async def open_cancel_scope(deadline: float = float('inf'), shield: bool = False
     except curio.TaskCancelled as exc:
         if timeout_expired:
             raise TimeoutError().with_traceback(exc.__traceback__) from None
-        else:
+        elif not scope._cancel_called:
             raise
     finally:
         if timeout_task:
@@ -188,7 +196,9 @@ class TaskGroup:
             await self.cancel_scope.cancel()
             raise
         else:
-            self._tasks.remove(await curio.current_task())
+            task = await curio.current_task()
+            self._tasks.remove(task)
+            set_cancel_scope(task, None)
 
     async def spawn(self, func: Callable, *args, name=None) -> None:
         if not self._active:
@@ -232,6 +242,7 @@ async def create_task_group():
                     await task.join()
                 except (curio.TaskError, curio.TaskCancelled):
                     group._tasks.remove(task)
+                    set_cancel_scope(task, None)
                     if task.exception:
                         if not isinstance(task.exception, (CancelledError, curio.CancelledError)):
                             exceptions.append(task.exception)
@@ -275,7 +286,7 @@ async def aopen(*args, **kwargs):
 
 
 #
-# Networking
+# Sockets and networking
 #
 
 class Socket(BaseSocket):
@@ -382,7 +393,7 @@ abc.Queue.register(Queue)
 
 
 #
-# Signal handling
+# Operating system signals
 #
 
 @asynccontextmanager

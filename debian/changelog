@@ -1,3 +1,9 @@
+anyio (0.0.post50-1) unstable; urgency=medium
+
+  * Merge
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Sun, 18 Nov 2018 13:51:49 +0100
+
 anyio (0.0.post49-1) unstable; urgency=medium
 
   * Merge, Bugfix
