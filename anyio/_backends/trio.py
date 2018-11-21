@@ -1,4 +1,3 @@
-import sys
 from typing import Callable
 
 import trio.hazmat
@@ -6,7 +5,7 @@ from async_generator import async_generator, yield_, asynccontextmanager, aclosi
 
 from .._networking import BaseSocket
 from .._utils import wrap_as_awaitable
-from .. import abc, claim_current_thread, T_Retval, _local
+from .. import abc, claim_worker_thread, T_Retval, _local
 from ..exceptions import ExceptionGroup, ClosedResourceError
 
 
@@ -107,8 +106,7 @@ async def create_task_group():
 
 async def run_in_thread(func: Callable[..., T_Retval], *args) -> T_Retval:
     def wrapper():
-        asynclib = sys.modules[__name__]
-        with claim_current_thread(asynclib):
+        with claim_worker_thread('trio'):
             _local.portal = portal
             return func(*args)
 
@@ -143,7 +141,7 @@ class Socket(BaseSocket):
     async def _notify_close(self):
         trio.hazmat.notify_socket_close(self._raw_socket)
 
-    def _check_cancelled(self) -> None:
+    def _check_cancelled(self):
         return trio.hazmat.checkpoint_if_cancelled()
 
     def _run_in_thread(self, func: Callable, *args):

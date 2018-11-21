@@ -1,39 +1,42 @@
+dist: xenial
 language: python
-sudo: false
 cache: pip
-python: "3.5.3"
+python: "3.6"
 
 stages:
-  - name: run linter
+  - name: static analysis
   - name: test
   - name: deploy to pypi
     if: type = push AND tag =~ ^\d+\.\d+\.\d+
 
 jobs:
   include:
-    - stage: run linter
+    - stage: static analysis
       env: TOXENV=flake8
+
+    - stage: static analysis
+      env: TOXENV=mypy
+      python: "3.7"
 
     - stage: test
       env: TOXENV=pypy3
       python: pypy3.5
-
-    - stage: test
-      env: TOXENV=py35
       after_success: &after_success
         - pip install coveralls
         - coveralls
+
+    - stage: test
+      env: TOXENV=py35
+      python: "3.5.3"
+      after_success: *after_success
 
     - stage: test
       env: TOXENV=py36
       python: "3.6"
       after_success: *after_success
 
-      # https://github.com/travis-ci/travis-ci/issues/9815
     - stage: test
       env: TOXENV=py37
-      dist: xenial
-      sudo: required
       python: "3.7"
       after_success: *after_success
 

@@ -1,6 +1,6 @@
-import sys
+import socket  # noqa: F401
 from functools import partial
-from typing import Callable, Set, Optional, Awaitable  # noqa: F401
+from typing import Callable, Set, Optional, Coroutine, Any, cast, Dict  # noqa: F401
 
 import curio.io
 import curio.meta
@@ -10,7 +10,7 @@ import curio.traps
 from async_generator import async_generator, asynccontextmanager, yield_
 
 from .._networking import BaseSocket
-from .. import abc, T_Retval, claim_current_thread, _local
+from .. import abc, T_Retval, claim_worker_thread, _local
 from ..exceptions import ExceptionGroup, CancelledError, ClosedResourceError
 
 
@@ -31,7 +31,7 @@ def run(func: Callable[..., T_Retval], *args, **curio_options) -> T_Retval:
     if exception is not None:
         raise exception
     else:
-        return retval
+        return cast(T_Retval, retval)
 
 
 #
@@ -41,9 +41,9 @@ def run(func: Callable[..., T_Retval], *args, **curio_options) -> T_Retval:
 finalize = curio.meta.finalize
 
 
-async def sleep(seconds: int):
+async def sleep(delay: float):
     await check_cancelled()
-    await curio.sleep(seconds)
+    await curio.sleep(delay)
 
 
 #
@@ -224,30 +224,33 @@ async def create_task_group():
         group = TaskGroup(cancel_scope, await curio.current_task())
         exceptions = []
         try:
-            await yield_(group)
-        except (CancelledError, curio.CancelledError, curio.TaskCancelled):
-            await cancel_scope.cancel()
-        except BaseException as exc:
-            exceptions.append(exc)
-            await cancel_scope.cancel()
+            try:
+                await yield_(group)
+            except (CancelledError, curio.CancelledError, curio.TaskCancelled):
+                await cancel_scope.cancel()
+            except BaseException as exc:
+                exceptions.append(exc)
+                await cancel_scope.cancel()
 
-        if cancel_scope.cancel_called:
-            for task in group._tasks:
-                if task.coro.cr_await is not None:
-                    await task.cancel(blocking=False)
+            if cancel_scope.cancel_called:
+                for task in group._tasks:
+                    if task.coro.cr_await is not None:
+                        await task.cancel(blocking=False)
 
-        while group._tasks:
-            for task in set(group._tasks):
-                try:
-                    await task.join()
-                except (curio.TaskError, curio.TaskCancelled):
-                    group._tasks.remove(task)
-                    set_cancel_scope(task, None)
-                    if task.exception:
-                        if not isinstance(task.exception, (CancelledError, curio.CancelledError)):
-                            exceptions.append(task.exception)
+            while group._tasks:
+                for task in set(group._tasks):
+                    try:
+                        await task.join()
+                    except (curio.TaskError, curio.TaskCancelled):
+                        group._tasks.remove(task)
+                        set_cancel_scope(task, None)
+                        if task.exception:
+                            if not isinstance(task.exception,
+                                              (CancelledError, curio.CancelledError)):
+                                exceptions.append(task.exception)
+        finally:
+            group._active = False
 
-        group._active = False
         if len(exceptions) > 1:
             raise ExceptionGroup(exceptions)
         elif exceptions:
@@ -260,8 +263,7 @@ async def create_task_group():
 
 async def run_in_thread(func: Callable[..., T_Retval], *args) -> T_Retval:
     def thread_worker():
-        asynclib = sys.modules[__name__]
-        with claim_current_thread(asynclib):
+        with claim_worker_thread('curio'):
             return func(*args)
 
     await check_cancelled()
@@ -290,8 +292,8 @@ async def aopen(*args, **kwargs):
 #
 
 class Socket(BaseSocket):
-    _reader_tasks = {}
-    _writer_tasks = {}
+    _reader_tasks = {}  # type: Dict[socket.SocketType, curio.Task]
+    _writer_tasks = {}  # type: Dict[socket.SocketType, curio.Task]
 
     async def _wait_readable(self):
         task = await curio.current_task()
@@ -328,7 +330,7 @@ class Socket(BaseSocket):
         if task:
             await task.cancel(blocking=False)
 
-    def _check_cancelled(self) -> Awaitable[None]:
+    def _check_cancelled(self) -> Coroutine[Any, Any, None]:
         return check_cancelled()
 
     def _run_in_thread(self, func: Callable, *args):
