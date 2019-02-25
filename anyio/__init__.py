@@ -538,6 +538,45 @@ def receive_signals(*signals: int) -> 'typing.ContextManager[typing.AsyncIterato
 # Testing and debugging
 #
 
+class TaskInfo:
+    """
+    Represents an asynchronous task.
+
+    :ivar int id: the unique identifier of the task
+    :ivar str name: the description of the task (if any)
+    :ivar ~collections.abc.Coroutine coro: the coroutine object of the task
+    """
+
+    __slots__ = 'id', 'name', 'coro'
+
+    def __init__(self, id, name: Optional[str], coro: Coroutine):
+        self.id = id
+        self.name = name
+        self.coro = coro
+
+    def __eq__(self, other):
+        if isinstance(other, TaskInfo):
+            return self.id == other.id
+
+        return NotImplemented
+
+    def __hash__(self):
+        return hash(self.id)
+
+    def __repr__(self):
+        return '{}(id={self.id!r}, name={self.name!r})'.format(self.__class__.__name__, self=self)
+
+
+def get_running_tasks() -> typing.List[TaskInfo]:
+    """
+    Return a list of running tasks in the current event loop.
+
+    :return: a list of task info objects
+
+    """
+    return _get_asynclib().get_running_tasks()
+
+
 async def wait_all_tasks_blocked() -> None:
     """Wait until all other tasks are waiting for something."""
     await _get_asynclib().wait_all_tasks_blocked()

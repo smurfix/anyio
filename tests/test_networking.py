@@ -16,7 +16,7 @@ class TestTCPStream:
     async def test_receive_some(self):
         async def server():
             async with await stream_server.accept() as stream:
-                assert stream._socket.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) == 1
+                assert stream.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0
                 command = await stream.receive_some(100)
                 await stream.send_all(command[::-1])
 
@@ -24,7 +24,7 @@ class TestTCPStream:
             async with await create_tcp_server(interface='localhost') as stream_server:
                 await tg.spawn(server)
                 async with await connect_tcp('localhost', stream_server.port) as client:
-                    assert client._socket.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) == 1
+                    assert client.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0
                     await client.send_all(b'blah')
                     response = await client.receive_some(100)
 
@@ -71,6 +71,23 @@ class TestTCPStream:
                     response = await client.receive_some(100)
 
         assert response == b'blahbleh'
+
+    @pytest.mark.anyio
+    async def test_send_large_buffer(self):
+        async def server():
+            async with await stream_server.accept() as stream:
+                await stream.send_all(buffer)
+
+        buffer = b'\xff' * 1024 * 1024  # should exceed the maximum kernel send buffer size
+        async with create_task_group() as tg:
+            async with await create_tcp_server(interface='localhost') as stream_server:
+                await tg.spawn(server)
+                async with await connect_tcp('localhost', stream_server.port) as client:
+                    response = await client.receive_exactly(len(buffer))
+                    with pytest.raises(IncompleteRead):
+                        await client.receive_exactly(1)
+
+        assert response == buffer
 
     @pytest.mark.parametrize('method_name, params', [
         ('receive_until', [b'\n', 100]),
@@ -182,20 +199,29 @@ class TestTCPStream:
 
         assert lines == {b'client1', b'client2'}
 
+    @pytest.mark.anyio
+    async def test_socket_options(self):
+        async with await create_tcp_server(interface='localhost') as stream_server:
+            stream_server.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 80000)
+            assert stream_server.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF) in (80000, 160000)
+            async with await connect_tcp('localhost', stream_server.port) as client:
+                client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 80000)
+                assert client.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF) in (80000, 160000)
+
 
 class TestUNIXStream:
     @pytest.mark.skipif(sys.platform == 'win32',
                         reason='UNIX sockets are not available on Windows')
     @pytest.mark.parametrize('as_path', [False])
     @pytest.mark.anyio
-    async def test_connect_unix(self, tmpdir, as_path):
+    async def test_connect_unix(self, tmpdir_factory, as_path):
         async def server():
             async with await stream_server.accept() as stream:
                 command = await stream.receive_some(100)
                 await stream.send_all(command[::-1])
 
         async with create_task_group() as tg:
-            path = str(tmpdir.join('socket'))
+            path = str(tmpdir_factory.mktemp('unix').join('socket'))
             if as_path:
                 path = Path(path)
 
@@ -404,3 +430,9 @@ class TestUDPSocket:
                     await client.send(b'123456')
                     assert await client.receive(100) == (b'654321', ('127.0.0.1', server.port))
                     await tg.cancel_scope.cancel()
+
+    @pytest.mark.anyio
+    async def test_socket_options(self):
+        async with await create_udp_socket(interface='127.0.0.1') as udp:
+            udp.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 80000)
+            assert udp.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF) in (80000, 160000)

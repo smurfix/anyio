@@ -143,11 +143,13 @@ class BaseSocket(metaclass=ABCMeta):
             return self._raw_socket.sendto(data, flags, addr)
 
     async def sendall(self, data: bytes, *, flags: int = 0) -> None:
-        to_send = len(data)
-        while to_send > 0:
+        offset = 0
+        total = len(data)
+        buffer = memoryview(data)
+        while offset < total:
             await self._check_cancelled()
             try:
-                sent = self._raw_socket.send(data, flags)
+                offset += self._raw_socket.send(buffer[offset:], flags)
             except (BlockingIOError, ssl.SSLWantWriteError):
                 await self._wait_writable()
             except ssl.SSLWantReadError:
@@ -155,8 +157,6 @@ class BaseSocket(metaclass=ABCMeta):
             except ssl.SSLEOFError:
                 self._raw_socket.close()
                 raise
-            else:
-                to_send -= sent
 
     async def start_tls(self, context: ssl.SSLContext,
                         server_hostname: Optional[str] = None,
@@ -215,6 +215,12 @@ class SocketStream(abc.SocketStream):
                     await self._socket.unwrap_tls()
         finally:
             await self._socket.close()
+
+    def getsockopt(self, level, optname, *args):
+        return self._socket.getsockopt(level, optname, *args)
+
+    def setsockopt(self, level, optname, value, *args) -> None:
+        self._socket.setsockopt(level, optname, value, *args)
 
     @property
     def buffered_data(self) -> bytes:
@@ -362,6 +368,12 @@ class SocketStreamServer(abc.SocketStreamServer):
     async def close(self) -> None:
         await self._socket.close()
 
+    def getsockopt(self, level, optname, *args):
+        return self._socket.getsockopt(level, optname, *args)
+
+    def setsockopt(self, level, optname, value, *args) -> None:
+        self._socket.setsockopt(level, optname, value, *args)
+
     @property
     def address(self) -> Union[Tuple[str, int], Tuple[str, int, int, int], str]:
         return self._socket.getsockname()
@@ -411,6 +423,12 @@ class UDPSocket(abc.UDPSocket):
     @property
     def port(self) -> int:
         return self.address[1]
+
+    def getsockopt(self, level, optname, *args):
+        return self._socket.getsockopt(level, optname, *args)
+
+    def setsockopt(self, level, optname, value, *args) -> None:
+        self._socket.setsockopt(level, optname, value, *args)
 
     async def receive(self, max_bytes: int) -> Tuple[bytes, str]:
         return await self._socket.recvfrom(max_bytes)
