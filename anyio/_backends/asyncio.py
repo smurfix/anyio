@@ -1,20 +1,21 @@
 import asyncio
 import concurrent.futures
 import inspect
+import math
 import os
 import socket
 from functools import partial
 from threading import Thread
 from typing import (
     Callable, Set, Optional, Union, Tuple, cast, Coroutine, Any, Awaitable, TypeVar,
-    Generator)
+    Generator, List, Dict)
 from weakref import WeakKeyDictionary
 
 from async_generator import async_generator, yield_, asynccontextmanager, aclosing
 
 from .._networking import BaseSocket
 from .. import abc, claim_worker_thread, _local, T_Retval, TaskInfo
-from ..exceptions import ExceptionGroup, CancelledError, ClosedResourceError
+from ..exceptions import ExceptionGroup, CancelledError, ClosedResourceError, ResourceBusyError
 
 try:
     from asyncio import run as native_run, create_task, get_running_loop, current_task, all_tasks
@@ -117,6 +118,7 @@ except ImportError:
         return asyncio.Task.current_task(loop)
 
 # Check whether there is native support for task names in asyncio (3.8+)
+_task_parents = WeakKeyDictionary()  # type: WeakKeyDictionary[asyncio.Task, int]
 _task_names = None  # type: Optional[WeakKeyDictionary[asyncio.Task, str]]
 if 'name' not in inspect.signature(create_task).parameters:
     _task_names = WeakKeyDictionary()
@@ -162,29 +164,72 @@ async def sleep(delay: float) -> None:
 # Timeouts and cancellation
 #
 
-class CancelScope(abc.CancelScope):
-    def __init__(self, host_task: asyncio.Task, deadline: float,
-                 parent_scope: Optional['CancelScope'], shield: bool = False) -> None:
-        self._host_task = host_task
+class CancelScope:
+    __slots__ = ('_deadline', '_shield', '_parent_scope', '_cancel_called', '_active',
+                 '_timeout_task', '_tasks', '_timeout_expired')
+
+    def __init__(self, deadline: float = math.inf, shield: bool = False):
         self._deadline = deadline
-        self._parent_scope = parent_scope
         self._shield = shield
+        self._parent_scope = None
         self._cancel_called = False
+        self._active = False
+        self._timeout_task = None
+        self._tasks = set()  # type: Set[asyncio.Task]
+        self._timeout_expired = False
+
+    async def __aenter__(self):
+        async def timeout():
+            await asyncio.sleep(self._deadline - get_running_loop().time())
+            self._timeout_expired = True
+            await self.cancel()
+
+        if self._active:
+            raise RuntimeError(
+                "Each CancelScope may only be used for a single 'async with' block"
+            )
+
+        host_task = current_task()
+        self._parent_scope = get_cancel_scope(host_task)
+        self._tasks.add(host_task)
+        set_cancel_scope(host_task, self)
+
+        if self._deadline != math.inf:
+            self._timeout_task = get_running_loop().create_task(timeout())
+
+        self._active = True
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        self._active = False
+        if self._timeout_task:
+            self._timeout_task.cancel()
+
+        host_task = current_task()
+        self._tasks.remove(host_task)
+        set_cancel_scope(host_task, self._parent_scope)
+
+        if isinstance(exc_val, asyncio.CancelledError):
+            if self._timeout_expired:
+                return True
+            elif self._cancel_called:
+                # This scope was directly cancelled
+                return True
 
     async def cancel(self):
-        if not self._cancel_called:
-            self._cancel_called = True
+        if self._cancel_called:
+            return
 
-            # Check if the host task should be cancelled
-            if self._host_task is not current_task():
-                scope = get_cancel_scope(self._host_task)
-                while scope and scope is not self:
-                    if scope.shield:
-                        break
-                    else:
-                        scope = scope._parent_scope
-                else:
-                    self._host_task.cancel()
+        self._cancel_called = True
+
+        # Cancel any contained tasks
+        for task in self._tasks:
+            if task._coro.cr_await is not None and not task._coro.cr_running:
+                # Cancel the task directly, but only if it's blocked and isn't within a shielded
+                # scope
+                scope = get_cancel_scope(task)
+                if scope is self or not scope.shield:
+                    task.cancel()
 
     @property
     def deadline(self) -> float:
@@ -197,6 +242,9 @@ class CancelScope(abc.CancelScope):
     @property
     def shield(self) -> bool:
         return self._shield
+
+
+abc.CancelScope.register(CancelScope)
 
 
 def get_cancel_scope(task: asyncio.Task) -> Optional[CancelScope]:
@@ -225,61 +273,31 @@ def check_cancelled():
         raise CancelledError
 
 
-@asynccontextmanager
-@async_generator
-async def open_cancel_scope(deadline: float = float('inf'), shield: bool = False):
-    async def timeout():
-        nonlocal timeout_expired
-        await asyncio.sleep(deadline - get_running_loop().time())
-        timeout_expired = True
-        await scope.cancel()
-
-    host_task = cast(asyncio.Task, current_task())
-    scope = CancelScope(host_task, deadline, get_cancel_scope(host_task), shield)
-    set_cancel_scope(host_task, scope)
-    timeout_expired = False
-
-    timeout_task = None
-    if deadline != float('inf'):
-        timeout_task = get_running_loop().create_task(timeout())
-
-    try:
-        await yield_(scope)
-    except asyncio.CancelledError as exc:
-        if timeout_expired:
-            raise TimeoutError().with_traceback(exc.__traceback__) from None
-        elif not scope._cancel_called:
-            raise
-    finally:
-        if timeout_task:
-            timeout_task.cancel()
-
-        set_cancel_scope(host_task, scope._parent_scope)
+def open_cancel_scope(deadline: float = math.inf, shield: bool = False) -> CancelScope:
+    return CancelScope(deadline, shield)
 
 
 @asynccontextmanager
 @async_generator
 async def fail_after(delay: float, shield: bool):
     deadline = get_running_loop().time() + delay
-    async with open_cancel_scope(deadline, shield) as cancel_scope:
-        await yield_(cancel_scope)
+    async with CancelScope(deadline, shield) as scope:
+        await yield_(scope)
+
+    if scope._timeout_expired:
+        raise TimeoutError
 
 
 @asynccontextmanager
 @async_generator
 async def move_on_after(delay: float, shield: bool):
     deadline = get_running_loop().time() + delay
-    cancel_scope = None
-    try:
-        async with open_cancel_scope(deadline, shield) as cancel_scope:
-            await yield_(cancel_scope)
-    except TimeoutError:
-        if not cancel_scope or not cancel_scope.cancel_called:
-            raise
+    async with CancelScope(deadline=deadline, shield=shield) as scope:
+        await yield_(scope)
 
 
 async def current_effective_deadline():
-    deadline = float('inf')
+    deadline = math.inf
     cancel_scope = get_cancel_scope(current_task())
     while cancel_scope:
         deadline = min(deadline, cancel_scope.deadline)
@@ -293,24 +311,59 @@ async def current_effective_deadline():
 #
 
 class TaskGroup:
-    __slots__ = 'cancel_scope', '_active', '_tasks', '_host_task'
+    __slots__ = 'cancel_scope', '_active'
 
-    def __init__(self, cancel_scope: 'CancelScope', host_task: asyncio.Task) -> None:
-        self.cancel_scope = cancel_scope
-        self._host_task = host_task
+    def __init__(self):
+        self.cancel_scope = CancelScope()
+        self._active = False
+
+    async def __aenter__(self):
+        await self.cancel_scope.__aenter__()
         self._active = True
-        self._tasks = set()  # type: Set[asyncio.Task]
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.cancel_scope.__aexit__(exc_type, exc_val, exc_tb)
+
+        exceptions = []  # type: List[BaseException]
+        ignore_exception = False
+        if exc_val is not None:
+            await self.cancel_scope.cancel()
+            if not isinstance(exc_val, (asyncio.CancelledError, CancelledError)):
+                exceptions.append(exc_val)
+            elif not self.cancel_scope._parent_scope:
+                ignore_exception = True
+            elif not self.cancel_scope._parent_scope.cancel_called:
+                ignore_exception = True
+
+        while self.cancel_scope._tasks:
+            for task in self.cancel_scope._tasks.copy():
+                try:
+                    await task
+                except BaseException as exc:
+                    set_cancel_scope(task, None)
+                    self.cancel_scope._tasks.remove(task)
+                    if not isinstance(exc, (asyncio.CancelledError, CancelledError)):
+                        exceptions.append(exc)
+
+        self._active = False
+        if len(exceptions) > 1:
+            raise ExceptionGroup(exceptions)
+        elif exceptions and exceptions[0] is not exc_val:
+            raise exceptions[0]
+
+        return ignore_exception
 
     async def _run_wrapped_task(self, func, *args):
+        task = current_task()
         try:
             await func(*args)
         except BaseException:
             await self.cancel_scope.cancel()
             raise
         else:
-            task = current_task()
-            self._tasks.remove(task)
             set_cancel_scope(task, None)
+            self.cancel_scope._tasks.remove(task)
 
     async def spawn(self, func: Callable, *args, name=None) -> None:
         if not self._active:
@@ -320,56 +373,17 @@ class TaskGroup:
             task = create_task(self._run_wrapped_task(func, *args), name=name)  # type: ignore
         else:
             task = create_task(self._run_wrapped_task(func, *args))
+            _task_parents[task] = id(current_task())
             if name is not None:
                 _task_names[task] = name
 
-        self._tasks.add(task)
-
         # Make the spawned task inherit the task group's cancel scope
+        self.cancel_scope._tasks.add(task)
         set_cancel_scope(task, self.cancel_scope)
 
 
 abc.TaskGroup.register(TaskGroup)
 
-
-@asynccontextmanager
-@async_generator
-async def create_task_group():
-    async with open_cancel_scope() as cancel_scope:
-        group = TaskGroup(cancel_scope, current_task())
-        exceptions = []
-        try:
-            try:
-                await yield_(group)
-            except (CancelledError, asyncio.CancelledError):
-                await cancel_scope.cancel()
-            except BaseException as exc:
-                exceptions.append(exc)
-                await cancel_scope.cancel()
-
-            if cancel_scope.cancel_called:
-                for task in group._tasks:
-                    if task._coro.cr_await is not None:
-                        task.cancel()
-
-            while group._tasks:
-                for task in set(group._tasks):
-                    try:
-                        await task
-                    except (CancelledError, asyncio.CancelledError):
-                        group._tasks.remove(task)
-                        set_cancel_scope(task, None)
-                    except BaseException as exc:
-                        group._tasks.remove(task)
-                        set_cancel_scope(task, None)
-                        exceptions.append(exc)
-        finally:
-            group._active = False
-
-        if len(exceptions) > 1:
-            raise ExceptionGroup(exceptions)
-        elif exceptions:
-            raise exceptions[0]
 
 #
 # Threads
@@ -482,43 +496,27 @@ async def aopen(*args, **kwargs):
 # Sockets and networking
 #
 
+_read_events = {}  # type: Dict[socket.SocketType, asyncio.Event]
+_write_events = {}  # type: Dict[socket.SocketType, asyncio.Event]
+
 
 class Socket(BaseSocket):
     __slots__ = '_loop', '_read_event', '_write_event'
 
     def __init__(self, raw_socket: socket.SocketType) -> None:
+        super().__init__(raw_socket)
         self._loop = get_running_loop()
         self._read_event = asyncio.Event(loop=self._loop)
         self._write_event = asyncio.Event(loop=self._loop)
-        super().__init__(raw_socket)
 
-    async def _wait_readable(self) -> None:
-        check_cancelled()
-        self._loop.add_reader(self._raw_socket, self._read_event.set)
-        try:
-            await self._read_event.wait()
-            self._read_event.clear()
-        finally:
-            self._loop.remove_reader(self._raw_socket)
+    def _wait_readable(self):
+        return wait_socket_readable(self._raw_socket)
 
-        if self._raw_socket.fileno() == -1:
-            raise ClosedResourceError
+    def _wait_writable(self):
+        return wait_socket_writable(self._raw_socket)
 
-    async def _wait_writable(self) -> None:
-        check_cancelled()
-        self._loop.add_writer(self._raw_socket, self._write_event.set)
-        try:
-            await self._write_event.wait()
-            self._write_event.clear()
-        finally:
-            self._loop.remove_writer(self._raw_socket)
-
-        if self._raw_socket.fileno() == -1:
-            raise ClosedResourceError
-
-    async def _notify_close(self) -> None:
-        self._read_event.set()
-        self._write_event.set()
+    def _notify_close(self):
+        return notify_socket_close(self._raw_socket)
 
     async def _check_cancelled(self) -> None:
         check_cancelled()
@@ -529,24 +527,45 @@ class Socket(BaseSocket):
 
 async def wait_socket_readable(sock: socket.SocketType) -> None:
     check_cancelled()
+    if _read_events.get(sock):
+        raise ResourceBusyError('reading from') from None
+
     loop = get_running_loop()
-    event = asyncio.Event(loop=loop)
+    event = _read_events[sock] = asyncio.Event(loop=loop)
     loop.add_reader(sock, event.set)
     try:
         await event.wait()
     finally:
         loop.remove_reader(sock)
+        del _read_events[sock]
+
+    if sock.fileno() == -1:
+        raise ClosedResourceError
 
 
 async def wait_socket_writable(sock: socket.SocketType) -> None:
     check_cancelled()
+    if _write_events.get(sock):
+        raise ResourceBusyError('writing to') from None
+
     loop = get_running_loop()
-    event = asyncio.Event(loop=loop)
+    event = _write_events[sock] = asyncio.Event(loop=loop)
     loop.add_writer(sock.fileno(), event.set)
     try:
         await event.wait()
     finally:
         loop.remove_writer(sock)
+        del _write_events[sock]
+
+    if sock.fileno() == -1:
+        raise ClosedResourceError
+
+
+async def notify_socket_close(sock: socket.SocketType) -> None:
+    for events_map in _read_events, _write_events:
+        event = events_map.get(sock)
+        if event is not None:
+            event.set()
 
 
 #
@@ -647,21 +666,29 @@ async def receive_signals(*signals: int):
 # Testing and debugging
 #
 
-def get_running_tasks():
-    task_infos = []
-    for task in all_tasks():
-        if not task.done():
-            name = task.get_name() if _task_names is None else _task_names.get(task)
-            task_infos.append(TaskInfo(id(task), name, task._coro))
+def _create_task_info(task: asyncio.Task) -> TaskInfo:
+    coro = task._coro  # type: ignore
+    if _task_names is None:
+        name = task.get_name()  # type: ignore
+    else:
+        name = _task_names.get(task)
 
-    return task_infos
+    return TaskInfo(id(task), _task_parents.get(task), name, coro)
 
 
-async def wait_all_tasks_blocked():
+async def get_current_task() -> TaskInfo:
+    return _create_task_info(current_task())  # type: ignore
+
+
+async def get_running_tasks() -> List[TaskInfo]:
+    return [_create_task_info(task) for task in all_tasks() if not task.done()]
+
+
+async def wait_all_tasks_blocked() -> None:
     this_task = current_task()
     while True:
         for task in all_tasks():
-            if task._coro.cr_await is None and task is not this_task:
+            if task._coro.cr_await is None and task is not this_task:  # type: ignore
                 await sleep(0)
                 break
         else:

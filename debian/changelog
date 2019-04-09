@@ -1,3 +1,9 @@
+anyio (1.0.0~rc1-1) unstable; urgency=medium
+
+  * Merge to RC1.
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Tue, 09 Apr 2019 13:23:37 +0200
+
 anyio (1.0.0~beta2-1) unstable; urgency=medium
 
   * Merge to beta2

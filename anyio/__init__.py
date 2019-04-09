@@ -144,13 +144,13 @@ def open_cancel_scope(*, shield: bool = False) -> 'typing.AsyncContextManager[Ca
     :return: an asynchronous context manager that yields a cancel scope
 
     """
-    return _get_asynclib().open_cancel_scope(shield=shield)
+    return _get_asynclib().CancelScope(shield=shield)
 
 
 def fail_after(delay: Optional[float], *,
                shield: bool = False) -> 'typing.AsyncContextManager[CancelScope]':
     """
-    Create a context manager which raises an exception if does not finish in time.
+    Create an async context manager which raises an exception if does not finish in time.
 
     :param delay: maximum allowed time (in seconds) before raising the exception, or ``None`` to
         disable the timeout
@@ -160,7 +160,7 @@ def fail_after(delay: Optional[float], *,
 
     """
     if delay is None:
-        return _get_asynclib().open_cancel_scope(shield=shield)
+        return _get_asynclib().CancelScope(shield=shield)
     else:
         return _get_asynclib().fail_after(delay, shield=shield)
 
@@ -168,7 +168,7 @@ def fail_after(delay: Optional[float], *,
 def move_on_after(delay: Optional[float], *,
                   shield: bool = False) -> 'typing.AsyncContextManager[CancelScope]':
     """
-    Create a context manager which is exited if it does not complete within the given time.
+    Create an async context manager which is exited if it does not complete within the given time.
 
     :param delay: maximum allowed time (in seconds) before exiting the context block, or ``None``
         to disable the timeout
@@ -177,7 +177,7 @@ def move_on_after(delay: Optional[float], *,
 
     """
     if delay is None:
-        return _get_asynclib().open_cancel_scope(shield=shield)
+        return _get_asynclib().CancelScope(shield=shield)
     else:
         return _get_asynclib().move_on_after(delay, shield=shield)
 
@@ -198,14 +198,14 @@ def current_effective_deadline() -> Coroutine[Any, Any, float]:
 # Task groups
 #
 
-def create_task_group() -> 'typing.AsyncContextManager[TaskGroup]':
+def create_task_group() -> TaskGroup:
     """
     Create a task group.
 
-    :return: an asynchronous context manager that yields a task group
+    :return: a task group
 
     """
-    return _get_asynclib().create_task_group()
+    return _get_asynclib().TaskGroup()
 
 
 #
@@ -273,7 +273,10 @@ def wait_socket_readable(sock: Union[socket.SocketType, ssl.SSLSocket]) -> Await
     Wait until the given socket has data to be read.
 
     :param sock: a socket object
-    :raises anyio.exceptions.ClosedResourceError: if the socket is closed while waiting
+    :raises anyio.exceptions.ClosedResourceError: if the socket was closed while waiting for the
+        socket to become readable
+    :raises anyio.exceptions.ResourceBusyError: if another task is already waiting for the socket
+        to become readable
 
     """
     return _get_asynclib().wait_socket_readable(sock)
@@ -284,10 +287,26 @@ def wait_socket_writable(sock: Union[socket.SocketType, ssl.SSLSocket]) -> Await
     Wait until the given socket can be written to.
 
     :param sock: a socket object
-    :raises anyio.exceptions.ClosedResourceError: if the socket is closed while waiting
+    :raises anyio.exceptions.ClosedResourceError: if the socket was closed while waiting for the
+        socket to become writable
+    :raises anyio.exceptions.ResourceBusyError: if another task is already waiting for the socket
+        to become writable
 
     """
     return _get_asynclib().wait_socket_writable(sock)
+
+
+def notify_socket_close(sock: socket.SocketType) -> Awaitable[None]:
+    """
+    Notify any relevant tasks that you are about to close a socket.
+
+    This will cause :exc:`~anyio.exceptions.ClosedResourceError` to be raised on any task waiting
+    for the socket to become readable or writable.
+
+    :param sock: the socket to be closed after this
+
+    """
+    return _get_asynclib().notify_socket_close(sock)
 
 
 async def connect_tcp(
@@ -519,7 +538,7 @@ def create_queue(capacity: int) -> Queue:
 # Operating system signals
 #
 
-def receive_signals(*signals: int) -> 'typing.ContextManager[typing.AsyncIterator[int]]':
+def receive_signals(*signals: int) -> 'typing.AsyncContextManager[typing.AsyncIterator[int]]':
     """
     Start receiving operating system signals.
 
@@ -543,14 +562,17 @@ class TaskInfo:
     Represents an asynchronous task.
 
     :ivar int id: the unique identifier of the task
+    :ivar parent_id: the identifier of the parent task, if any
+    :vartype parent_id: Optional[int]
     :ivar str name: the description of the task (if any)
     :ivar ~collections.abc.Coroutine coro: the coroutine object of the task
     """
 
-    __slots__ = 'id', 'name', 'coro'
+    __slots__ = 'id', 'parent_id', 'name', 'coro'
 
-    def __init__(self, id, name: Optional[str], coro: Coroutine):
+    def __init__(self, id: int, parent_id: Optional[int], name: Optional[str], coro: Coroutine):
         self.id = id
+        self.parent_id = parent_id
         self.name = name
         self.coro = coro
 
@@ -567,14 +589,24 @@ class TaskInfo:
         return '{}(id={self.id!r}, name={self.name!r})'.format(self.__class__.__name__, self=self)
 
 
-def get_running_tasks() -> typing.List[TaskInfo]:
+async def get_current_task() -> TaskInfo:
+    """
+    Return the current task.
+
+    :return: a representation of the current task
+
+    """
+    return await _get_asynclib().get_current_task()
+
+
+async def get_running_tasks() -> typing.List[TaskInfo]:
     """
     Return a list of running tasks in the current event loop.
 
     :return: a list of task info objects
 
     """
-    return _get_asynclib().get_running_tasks()
+    return await _get_asynclib().get_running_tasks()
 
 
 async def wait_all_tasks_blocked() -> None:
