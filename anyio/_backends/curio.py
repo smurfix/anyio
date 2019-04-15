@@ -193,7 +193,7 @@ async def check_cancelled():
     cancel_scope = get_cancel_scope(task)
     if cancel_scope is None:
         return
-    if not cancel_scope._shield and cancel_scope._cancel_called:
+    if cancel_scope._cancel_called:
         raise CancelledError(cancel_scope._cancel_called)
 
 
