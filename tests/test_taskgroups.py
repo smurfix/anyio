@@ -4,7 +4,7 @@ import trio
 
 from anyio import (
     create_task_group, sleep, move_on_after, fail_after, open_cancel_scope, wait_all_tasks_blocked,
-    current_effective_deadline)
+    current_effective_deadline, current_time, get_cancelled_exc_class)
 from anyio._backends import asyncio
 from anyio.exceptions import ExceptionGroup
 
@@ -362,3 +362,71 @@ async def test_exception_cancels_siblings():
 
     exc.match('foo')
     assert not sleep_completed
+
+
+@pytest.mark.anyio
+async def test_cancel_cascade():
+    async def do_something():
+        async with create_task_group() as task_group:
+            await task_group.spawn(sleep, 1)
+
+        raise Exception('foo')
+
+    async with create_task_group() as tg:
+        await tg.spawn(do_something)
+        await wait_all_tasks_blocked()
+        await tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_cancelled_parent():
+    async def child():
+        async with open_cancel_scope():
+            await sleep(1)
+
+        raise Exception('foo')
+
+    async def parent(tg):
+        await wait_all_tasks_blocked()
+        await tg.spawn(child)
+
+    async with create_task_group() as tg:
+        await tg.spawn(parent, tg)
+        await tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_shielded_deadline():
+    async with move_on_after(10):
+        async with open_cancel_scope(shield=True):
+            async with move_on_after(1000):
+                assert await current_effective_deadline() - await current_time() > 900
+
+
+@pytest.mark.anyio
+async def test_deadline_reached_on_start():
+    async with move_on_after(0):
+        await sleep(0)
+        pytest.fail('Execution should not reach this point')
+
+
+@pytest.mark.anyio
+async def test_timeout_error_with_multiple_cancellations():
+    with pytest.raises(TimeoutError):
+        async with fail_after(0.1):
+            async with create_task_group() as tg:
+                await tg.spawn(sleep, 2)
+                await sleep(2)
+
+
+@pytest.mark.anyio
+async def test_catch_cancellation():
+    finalizer_done = False
+    async with move_on_after(0.1):
+        try:
+            await sleep(1)
+        except get_cancelled_exc_class():
+            finalizer_done = True
+            raise
+
+    assert finalizer_done

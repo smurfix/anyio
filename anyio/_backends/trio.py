@@ -3,10 +3,9 @@ from typing import Callable, Optional, List
 import trio.hazmat
 from async_generator import async_generator, yield_, asynccontextmanager, aclosing
 
-from anyio.exceptions import ResourceBusyError
 from .._networking import BaseSocket
 from .. import abc, claim_worker_thread, T_Retval, _local, TaskInfo
-from ..exceptions import ExceptionGroup, ClosedResourceError
+from ..exceptions import ExceptionGroup, ClosedResourceError, ResourceBusyError
 
 
 #
@@ -27,6 +26,9 @@ sleep = trio.sleep
 #
 # Timeouts and cancellation
 #
+
+CancelledError = trio.Cancelled
+
 
 class CancelScope:
     __slots__ = '__original'
@@ -88,9 +90,17 @@ async def current_effective_deadline():
     return trio.current_effective_deadline()
 
 
+async def current_time():
+    return trio.current_time()
+
+
 #
 # Task groups
 #
+
+class TrioExceptionGroup(ExceptionGroup, trio.MultiError):
+    pass
+
 
 class TaskGroup:
     __slots__ = '_active', '_nursery_manager', '_nursery', 'cancel_scope'
@@ -110,8 +120,7 @@ class TaskGroup:
         try:
             return await self._nursery_manager.__aexit__(exc_type, exc_val, exc_tb)
         except trio.MultiError as exc:
-            if not all(isinstance(e, trio.Cancelled) for e in exc.exceptions):
-                raise ExceptionGroup(exc.exceptions) from None
+            raise TrioExceptionGroup(exc.exceptions) from None
         finally:
             self._active = False
 

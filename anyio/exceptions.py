@@ -4,12 +4,7 @@ import trio
 
 
 class ExceptionGroup(trio.MultiError):
-    """Raised when multiple exceptions have been raised in a task group."""
     pass
-
-
-class CancelledError(Exception):
-    """Raised when the enclosing cancel scope has been cancelled."""
 
 
 class IncompleteRead(Exception):

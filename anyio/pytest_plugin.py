@@ -4,7 +4,7 @@ from inspect import iscoroutinefunction
 import pytest
 from async_generator import isasyncgenfunction
 
-import anyio
+from . import run, BACKENDS
 
 
 def pytest_configure(config):
@@ -15,7 +15,7 @@ def pytest_configure(config):
 def pytest_addoption(parser):
     group = parser.getgroup('AnyIO')
     group.addoption(
-        '--anyio-backends', action='store', dest='anyio_backends', default=anyio.BACKENDS[0],
+        '--anyio-backends', action='store', dest='anyio_backends', default=BACKENDS[0],
         help='Comma separated list of backends to use for running asynchronous tests.',
     )
 
@@ -30,21 +30,21 @@ def pytest_fixture_setup(fixturedef, request):
         if isasyncgenfunction(func):
             gen = func(*args, **kwargs)
             try:
-                value = anyio.run(gen.__anext__, backend=backend)
+                value = run(gen.__anext__, backend=backend)
             except StopAsyncIteration:
                 raise RuntimeError('Async generator did not yield')
 
             yield value
 
             try:
-                anyio.run(gen.__anext__, backend=backend)
+                run(gen.__anext__, backend=backend)
             except StopAsyncIteration:
                 pass
             else:
-                anyio.run(gen.aclose, backend=backend)
+                run(gen.aclose, backend=backend)
                 raise RuntimeError('Async generator fixture did not stop')
         else:
-            yield anyio.run(partial(func, *args, **kwargs), backend=backend)
+            yield run(partial(func, *args, **kwargs), backend=backend)
 
     func = fixturedef.func
     if (isasyncgenfunction(func) or iscoroutinefunction(func)) and 'anyio' in request.keywords:
@@ -63,7 +63,7 @@ def pytest_generate_tests(metafunc):
     if marker:
         backends = metafunc.config.getoption('anyio_backends')
         if backends == 'all':
-            backends = anyio.BACKENDS
+            backends = BACKENDS
         else:
             backends = backends.replace(' ', '').split(',')
 
@@ -71,11 +71,30 @@ def pytest_generate_tests(metafunc):
         metafunc.parametrize('anyio_backend', backends, scope='session')
 
 
+def check_test_function_type(func):
+    if not iscoroutinefunction(func):
+        funcname = '{}.{}'.format(func.__module__, func.__qualname__)
+        pytest.fail('{} is not a coroutine function'.format(funcname))
+
+
 @pytest.mark.tryfirst
 def pytest_pyfunc_call(pyfuncitem):
+    def run_with_hypothesis(**kwargs):
+        run(partial(original_func, **kwargs), backend=backend)
+
     if pyfuncitem.get_closest_marker('anyio'):
-        funcargs = pyfuncitem.funcargs
         backend = pyfuncitem._request.getfixturevalue('anyio_backend')
+        if hasattr(pyfuncitem.obj, 'hypothesis'):
+            # Wrap the inner test function unless it's already wrapped
+            original_func = pyfuncitem.obj.hypothesis.inner_test
+            if original_func.__qualname__ != run_with_hypothesis.__qualname__:
+                check_test_function_type(original_func)
+                pyfuncitem.obj.hypothesis.inner_test = run_with_hypothesis
+
+            return False
+
+        check_test_function_type(pyfuncitem.obj)
+        funcargs = pyfuncitem.funcargs
         testargs = {arg: funcargs[arg] for arg in pyfuncitem._fixtureinfo.argnames}
-        anyio.run(partial(pyfuncitem.obj, **testargs), backend=backend)
+        run(partial(pyfuncitem.obj, **testargs), backend=backend)
         return True

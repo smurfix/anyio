@@ -45,8 +45,11 @@ def run(func: Callable[..., Coroutine[Any, Any, T_Retval]], *args,
     :raises LookupError: if the named backend is not found
 
     """
-    asynclib_name = _detect_running_asynclib()
-    if asynclib_name:
+    try:
+        asynclib_name = sniffio.current_async_library()
+    except sniffio.AsyncLibraryNotFoundError:
+        pass
+    else:
         raise RuntimeError('Already running {} in this thread'.format(asynclib_name))
 
     try:
@@ -79,25 +82,8 @@ def claim_worker_thread(backend) -> typing.Generator[Any, None, None]:
         del _local.current_async_module
 
 
-def _detect_running_asynclib() -> Optional[str]:
-    # This function can be removed once https://github.com/python-trio/sniffio/pull/5 has been
-    # merged
-    try:
-        return sniffio.current_async_library()
-    except sniffio.AsyncLibraryNotFoundError:
-        if 'curio' in sys.modules:
-            from curio.meta import curio_running
-            if curio_running():
-                return 'curio'
-
-        return None
-
-
 def _get_asynclib():
-    asynclib_name = _detect_running_asynclib()
-    if asynclib_name is None:
-        raise RuntimeError('Not running in any supported asynchronous event loop')
-
+    asynclib_name = sniffio.current_async_library()
     modulename = 'anyio._backends.' + asynclib_name
     try:
         return sys.modules[modulename]
@@ -132,16 +118,21 @@ def sleep(delay: float) -> Coroutine[Any, Any, None]:
     return _get_asynclib().sleep(delay)
 
 
+def get_cancelled_exc_class() -> typing.Type[BaseException]:
+    """Return the current async library's cancellation exception class."""
+    return _get_asynclib().CancelledError
+
+
 #
 # Timeouts and cancellation
 #
 
-def open_cancel_scope(*, shield: bool = False) -> 'typing.AsyncContextManager[CancelScope]':
+def open_cancel_scope(*, shield: bool = False) -> CancelScope:
     """
     Open a cancel scope.
 
     :param shield: ``True`` to shield the cancel scope from external cancellation
-    :return: an asynchronous context manager that yields a cancel scope
+    :return: a cancel scope
 
     """
     return _get_asynclib().CancelScope(shield=shield)
@@ -192,6 +183,17 @@ def current_effective_deadline() -> Coroutine[Any, Any, float]:
 
     """
     return _get_asynclib().current_effective_deadline()
+
+
+def current_time() -> Coroutine[Any, Any, float]:
+    """
+    Return the current value of the event loop's internal clock.
+
+    :return the clock value (seconds)
+    :rtype: float
+
+    """
+    return _get_asynclib().current_time()
 
 
 #
@@ -267,47 +269,6 @@ def aopen(file: Union[str, Path, int], mode: str = 'r', buffering: int = -1,
 #
 # Sockets and networking
 #
-
-def wait_socket_readable(sock: Union[socket.SocketType, ssl.SSLSocket]) -> Awaitable[None]:
-    """
-    Wait until the given socket has data to be read.
-
-    :param sock: a socket object
-    :raises anyio.exceptions.ClosedResourceError: if the socket was closed while waiting for the
-        socket to become readable
-    :raises anyio.exceptions.ResourceBusyError: if another task is already waiting for the socket
-        to become readable
-
-    """
-    return _get_asynclib().wait_socket_readable(sock)
-
-
-def wait_socket_writable(sock: Union[socket.SocketType, ssl.SSLSocket]) -> Awaitable[None]:
-    """
-    Wait until the given socket can be written to.
-
-    :param sock: a socket object
-    :raises anyio.exceptions.ClosedResourceError: if the socket was closed while waiting for the
-        socket to become writable
-    :raises anyio.exceptions.ResourceBusyError: if another task is already waiting for the socket
-        to become writable
-
-    """
-    return _get_asynclib().wait_socket_writable(sock)
-
-
-def notify_socket_close(sock: socket.SocketType) -> Awaitable[None]:
-    """
-    Notify any relevant tasks that you are about to close a socket.
-
-    This will cause :exc:`~anyio.exceptions.ClosedResourceError` to be raised on any task waiting
-    for the socket to become readable or writable.
-
-    :param sock: the socket to be closed after this
-
-    """
-    return _get_asynclib().notify_socket_close(sock)
-
 
 async def connect_tcp(
     address: IPAddressType, port: int, *, ssl_context: Optional[SSLContext] = None,
@@ -476,6 +437,47 @@ async def create_udp_socket(
     except BaseException:
         await sock.close()
         raise
+
+
+def wait_socket_readable(sock: Union[socket.SocketType, ssl.SSLSocket]) -> Awaitable[None]:
+    """
+    Wait until the given socket has data to be read.
+
+    :param sock: a socket object
+    :raises anyio.exceptions.ClosedResourceError: if the socket was closed while waiting for the
+        socket to become readable
+    :raises anyio.exceptions.ResourceBusyError: if another task is already waiting for the socket
+        to become readable
+
+    """
+    return _get_asynclib().wait_socket_readable(sock)
+
+
+def wait_socket_writable(sock: Union[socket.SocketType, ssl.SSLSocket]) -> Awaitable[None]:
+    """
+    Wait until the given socket can be written to.
+
+    :param sock: a socket object
+    :raises anyio.exceptions.ClosedResourceError: if the socket was closed while waiting for the
+        socket to become writable
+    :raises anyio.exceptions.ResourceBusyError: if another task is already waiting for the socket
+        to become writable
+
+    """
+    return _get_asynclib().wait_socket_writable(sock)
+
+
+def notify_socket_close(sock: socket.SocketType) -> Awaitable[None]:
+    """
+    Notify any relevant tasks that you are about to close a socket.
+
+    This will cause :exc:`~anyio.exceptions.ClosedResourceError` to be raised on any task waiting
+    for the socket to become readable or writable.
+
+    :param sock: the socket to be closed after this
+
+    """
+    return _get_asynclib().notify_socket_close(sock)
 
 
 #
