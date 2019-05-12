@@ -6,7 +6,6 @@ import threading
 import typing
 from contextlib import contextmanager
 from importlib import import_module
-from pathlib import Path
 from ssl import SSLContext
 from typing import TypeVar, Callable, Union, Optional, Awaitable, Coroutine, Any, Dict
 
@@ -53,7 +52,7 @@ def run(func: Callable[..., Coroutine[Any, Any, T_Retval]], *args,
         raise RuntimeError('Already running {} in this thread'.format(asynclib_name))
 
     try:
-        asynclib = import_module('{}._backends.{}'.format(__name__, backend))
+        asynclib = import_module('{}._backends._{}'.format(__name__, backend))
     except ImportError as exc:
         raise LookupError('No such backend: {}'.format(backend)) from exc
 
@@ -72,7 +71,7 @@ def run(func: Callable[..., Coroutine[Any, Any, T_Retval]], *args,
 
 @contextmanager
 def claim_worker_thread(backend) -> typing.Generator[Any, None, None]:
-    module = sys.modules['anyio._backends.' + backend]
+    module = sys.modules['anyio._backends._' + backend]
     _local.current_async_module = module
     token = sniffio.current_async_library_cvar.set(backend)
     try:
@@ -84,7 +83,7 @@ def claim_worker_thread(backend) -> typing.Generator[Any, None, None]:
 
 def _get_asynclib():
     asynclib_name = sniffio.current_async_library()
-    modulename = 'anyio._backends.' + asynclib_name
+    modulename = 'anyio._backends._' + asynclib_name
     try:
         return sys.modules[modulename]
     except KeyError:
@@ -247,7 +246,7 @@ def run_async_from_thread(func: Callable[..., Coroutine[Any, Any, T_Retval]], *a
 # Async file I/O
 #
 
-def aopen(file: Union[str, Path, int], mode: str = 'r', buffering: int = -1,
+def aopen(file: Union[str, 'os.PathLike', int], mode: str = 'r', buffering: int = -1,
           encoding: Optional[str] = None, errors: Optional[str] = None,
           newline: Optional[str] = None, closefd: bool = True,
           opener: Optional[Callable] = None) -> Coroutine[Any, Any, AsyncFile]:
@@ -260,7 +259,7 @@ def aopen(file: Union[str, Path, int], mode: str = 'r', buffering: int = -1,
     :rtype: AsyncFile
 
     """
-    if isinstance(file, Path):
+    if sys.version_info < (3, 6) and hasattr(file, '__fspath__'):
         file = str(file)
 
     return _get_asynclib().aopen(file, mode, buffering, encoding, errors, newline, closefd, opener)
@@ -314,7 +313,7 @@ async def connect_tcp(
         raise
 
 
-async def connect_unix(path: Union[str, Path]) -> SocketStream:
+async def connect_unix(path: Union[str, 'os.PathLike']) -> SocketStream:
     """
     Connect to the given UNIX socket.
 
@@ -376,7 +375,7 @@ async def create_tcp_server(
 
 
 async def create_unix_server(
-        path: Union[str, Path], *, mode: Optional[int] = None) -> SocketStreamServer:
+        path: Union[str, 'os.PathLike'], *, mode: Optional[int] = None) -> SocketStreamServer:
     """
     Start a UNIX socket server.
 

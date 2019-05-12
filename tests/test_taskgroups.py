@@ -5,7 +5,7 @@ import trio
 from anyio import (
     create_task_group, sleep, move_on_after, fail_after, open_cancel_scope, wait_all_tasks_blocked,
     current_effective_deadline, current_time, get_cancelled_exc_class)
-from anyio._backends import asyncio
+from anyio._backends import _asyncio
 from anyio.exceptions import ExceptionGroup
 
 
@@ -42,7 +42,7 @@ async def test_success():
 
 
 @pytest.mark.parametrize('run_func, as_coro_obj', [
-    (asyncio.native_run, True),
+    (_asyncio.native_run, True),
     (curio.run, False),
     (trio.run, False)
 ], ids=['asyncio', 'curio', 'trio'])
@@ -430,3 +430,39 @@ async def test_catch_cancellation():
             raise
 
     assert finalizer_done
+
+
+@pytest.mark.anyio
+async def test_nested_fail_after():
+    async def killer(scope):
+        await wait_all_tasks_blocked()
+        await scope.cancel()
+
+    async with create_task_group() as tg:
+        async with open_cancel_scope() as scope:
+            async with open_cancel_scope():
+                await tg.spawn(killer, scope)
+                async with fail_after(1):
+                    await sleep(2)
+                    pytest.fail('Execution should not reach this point')
+
+                pytest.fail('Execution should not reach this point either')
+
+            pytest.fail('Execution should also not reach this point')
+
+    assert scope.cancel_called
+
+
+@pytest.mark.anyio
+async def test_nested_shield():
+    async def killer(scope):
+        await wait_all_tasks_blocked()
+        await scope.cancel()
+
+    with pytest.raises(TimeoutError):
+        async with create_task_group() as tg:
+            async with open_cancel_scope() as scope:
+                async with open_cancel_scope(shield=True):
+                    await tg.spawn(killer, scope)
+                    async with fail_after(0.2):
+                        await sleep(2)
