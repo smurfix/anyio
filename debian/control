@@ -3,12 +3,15 @@ Maintainer: Matthias Urlichs <matthias@urlichs.de>
 Section: python
 Priority: optional
 Build-Depends: dh-python, python3-setuptools, python3-all, debhelper (>= 9),
-  python3-setuptools-scm (>> 3)
+  python3-setuptools-scm (>> 3),
+  python3-sniffio,
 Standards-Version: 3.9.6
 
 Package: python3-anyio
 Architecture: all
-Depends: ${misc:Depends}, ${python3:Depends}
+Depends: ${misc:Depends}, ${python3:Depends},
+  python3-sniffio,
+Recommends: python3-trio,
 Description: High level compatibility layer for multiple asynchronous eve
  AnyIO is a asynchronous compatibility API that allows applications and libraries written against
  it to run unmodified on asyncio, curio and trio.
