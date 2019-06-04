@@ -1,0 +1,21 @@
+---
+
+variables:
+  CI_GPG_KEYID: "FCD3FB3E"
+  DEBEMAIL: "Gitlab CI <gitlabci-noreply@noris.de>"
+  USER: "root"
+
+before_script:
+  - 'find ../ -iname "*.changes" -print -delete'
+  - 'eval $(ssh-agent)'
+  - 'dch -v "${CI_COMMIT_TAG}-0$(lsb_release -s -c)" -D "$(lsb_release -s -c)" -b "Autobuild on Tag ${CI_COMMIT_TAG}"'
+  - 'head debian/changelog'
+  - '[ -f "/usr/bin/git" ] && rm /usr/bin/git'
+stretch:
+  only:
+    - tags
+  image: 'docker-registry.noris.net/oci/debbuilder:stretch'
+  script:
+    - 'dpkg-source -b .'
+    - 'dpkg-buildpackage -b -k${CI_GPG_KEYID}'
+    - dput -d achmed ../*.changes
