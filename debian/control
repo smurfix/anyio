@@ -12,7 +12,7 @@ Package: python3-anyio
 Architecture: all
 Depends: ${misc:Depends}, ${python3:Depends},
   python3-sniffio (>= 1.1),
-  python3-async-generator || python3 (>> 3.7),
+  python3-async-generator | python3 (>> 3.7),
 Recommends: python3-trio (>= 0.11),
 Description: High level compatibility layer for multiple asynchronous eve
  AnyIO is a asynchronous compatibility API that allows applications and libraries written against
