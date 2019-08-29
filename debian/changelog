@@ -1,3 +1,9 @@
+anyio (1.0.1-1) unstable; urgency=medium
+
+  * Merge to master
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Thu, 29 Aug 2019 10:10:46 +0200
+
 anyio (1.0.0-2) unstable; urgency=medium
 
   * Require sniffio 1.1
