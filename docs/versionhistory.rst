@@ -1,12 +1,20 @@
 Version history
 ===============
 
-This library adheres to `Semantic Versioning <http://semver.org/>`_.
+This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
 **UNRELEASED**
 
+- Added the ``lock`` parameter to ``anyio.create_condition()`` (PR by Matthias Urlichs)
+- Added async iteration for queues (PR by Matthias Urlichs)
+- Fixed compatibility with trio v0.12
+- Fixed IPv6 support in ``create_tcp_server()``, ``connect_tcp()`` and ``create_udp_socket()``
+
+**1.0.0**
+
 - Fixed pathlib2_ compatibility with ``anyio.aopen()``
 - Fixed timeouts not propagating from nested scopes on asyncio and curio (PR by Matthias Urlichs)
+- Fixed incorrect call order in socket close notifications on asyncio (mostly affecting Windows)
 - Prefixed backend module names with an underscore to better indicate privateness
 
  .. _pathlib2: https://pypi.org/project/pathlib2/

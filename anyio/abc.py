@@ -2,7 +2,9 @@ from abc import ABCMeta, abstractmethod
 from io import SEEK_SET
 from ipaddress import IPv4Address, IPv6Address
 from ssl import SSLContext
-from typing import Callable, TypeVar, Optional, Tuple, Union, AsyncIterable, Dict, List, Coroutine
+from types import TracebackType
+from typing import (
+    Callable, TypeVar, Optional, Tuple, Union, AsyncIterable, Dict, List, Coroutine, Type)
 
 T_Retval = TypeVar('T_Retval')
 IPAddressType = Union[str, IPv4Address, IPv6Address]
@@ -119,6 +121,14 @@ class Queue(metaclass=ABCMeta):
         :return: the removed item
         """
 
+    @abstractmethod
+    def __aiter__(self):
+        return self
+
+    @abstractmethod
+    def __anext__(self) -> Coroutine:
+        """Return the next item in the queue."""
+
 
 class TaskGroup(metaclass=ABCMeta):
     """
@@ -139,6 +149,15 @@ class TaskGroup(metaclass=ABCMeta):
         :param args: positional arguments to call the function with
         :param name: name of the task, for the purposes of introspection and debugging
         """
+
+    @abstractmethod
+    async def __aenter__(self) -> 'TaskGroup':
+        """Enter the task group context and allow starting new tasks."""
+
+    @abstractmethod
+    async def __aexit__(self, exc_type: Type[BaseException], exc_val: BaseException,
+                        exc_tb: TracebackType) -> Optional[bool]:
+        """Exit the task group context waiting for all tasks to finish."""
 
 
 class CancelScope(metaclass=ABCMeta):
@@ -596,7 +615,7 @@ class UDPSocket(metaclass=ABCMeta):
         """
 
     @abstractmethod
-    async def receive(self, max_bytes: int) -> Tuple[bytes, str]:
+    async def receive(self, max_bytes: int) -> Tuple[bytes, Tuple[str, int]]:
         """
         Receive a datagram.
 
@@ -604,7 +623,7 @@ class UDPSocket(metaclass=ABCMeta):
         was really larger.
 
         :param max_bytes: maximum amount of bytes to be returned
-        :return: the bytes received
+        :return: a tuple of (bytes received, (source IP address, source port))
         """
 
     @abstractmethod
