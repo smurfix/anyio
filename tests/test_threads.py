@@ -1,8 +1,11 @@
 import threading
+import time
 
 import pytest
 
-from anyio import run_async_from_thread, run_in_thread, create_task_group, sleep
+from anyio import (
+    run_async_from_thread, run_in_thread, create_task_group, sleep, create_capacity_limiter,
+    create_event)
 
 
 @pytest.mark.anyio
@@ -60,9 +63,70 @@ async def test_run_in_thread_exception():
     exc.match('^foo$')
 
 
+@pytest.mark.anyio
+async def test_run_in_custom_limiter():
+    def thread_worker():
+        nonlocal num_active_threads, max_active_threads
+        num_active_threads += 1
+        max_active_threads = max(num_active_threads, max_active_threads)
+        event.wait(1)
+        num_active_threads -= 1
+
+    async def task_worker():
+        await run_in_thread(thread_worker, limiter=limiter)
+
+    event = threading.Event()
+    num_active_threads = max_active_threads = 0
+    limiter = create_capacity_limiter(3)
+    async with create_task_group() as tg:
+        for _ in range(4):
+            await tg.spawn(task_worker)
+
+        await sleep(0.1)
+        assert num_active_threads == 3
+        assert limiter.borrowed_tokens == 3
+        event.set()
+
+    assert num_active_threads == 0
+    assert max_active_threads == 3
+
+
 def test_run_async_from_unclaimed_thread():
     async def foo():
         pass
 
     exc = pytest.raises(RuntimeError, run_async_from_thread, foo)
     exc.match('This function can only be run from an AnyIO worker thread')
+
+
+@pytest.mark.anyio
+async def test_cancel_worker_thread():
+    """
+    Test that when a task running a worker thread is cancelled, the cancellation is not acted on
+    until the thread finishes.
+
+    """
+    def thread_worker():
+        nonlocal last_active
+        run_async_from_thread(sleep_event.set)
+        time.sleep(0.2)
+        last_active = 'thread'
+        run_async_from_thread(finish_event.set)
+
+    async def task_worker():
+        nonlocal last_active
+        try:
+            await run_in_thread(thread_worker)
+        finally:
+            last_active = 'task'
+
+    sleep_event = create_event()
+    finish_event = create_event()
+    last_active = None
+    async with create_task_group() as tg:
+        await tg.spawn(task_worker)
+        await sleep_event.wait()
+        await tg.cancel_scope.cancel()
+
+    await finish_event.wait()
+    assert last_active == 'task'

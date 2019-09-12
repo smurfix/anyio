@@ -13,10 +13,11 @@ import sniffio
 
 from .abc import (  # noqa: F401
     IPAddressType, CancelScope, UDPSocket, Lock, Condition, Event, Semaphore, Queue, TaskGroup,
-    Stream, SocketStreamServer, SocketStream, AsyncFile)
+    Stream, SocketStreamServer, SocketStream, AsyncFile, CapacityLimiter)
 from . import _networking
 
 BACKENDS = 'asyncio', 'curio', 'trio'
+IPPROTO_IPV6 = getattr(socket, 'IPPROTO_IPV6', 41)  # https://bugs.python.org/issue29515
 
 T_Retval = TypeVar('T_Retval', covariant=True)
 T_Agen = TypeVar('T_Agen')
@@ -213,16 +214,19 @@ def create_task_group() -> TaskGroup:
 # Threads
 #
 
-def run_in_thread(func: Callable[..., T_Retval], *args) -> Awaitable[T_Retval]:
+def run_in_thread(func: Callable[..., T_Retval], *args,
+                  limiter: Optional[CapacityLimiter] = None) -> Awaitable[T_Retval]:
     """
     Start a thread that calls the given function with the given arguments.
 
     :param func: a callable
     :param args: positional arguments for the callable
+    :param limiter: capacity limiter to use to limit the total amount of threads running
+        (if omitted, the default limiter is used)
     :return: an awaitable that yields the return value of the function.
 
     """
-    return _get_asynclib().run_in_thread(func, *args)
+    return _get_asynclib().run_in_thread(func, *args, limiter=limiter)
 
 
 def run_async_from_thread(func: Callable[..., Coroutine[Any, Any, T_Retval]], *args) -> T_Retval:
@@ -297,7 +301,7 @@ async def connect_tcp(
 
     # getaddrinfo() will raise an exception if name resolution fails
     address = str(address)
-    addrlist = await run_in_thread(socket.getaddrinfo, address, port, family)
+    addrlist = await run_in_thread(socket.getaddrinfo, address, port, family, socket.SOCK_STREAM)
     family, type_, proto, _cn, sa = addrlist[0]
     raw_socket = socket.socket(family, type_, proto)
     sock = _get_asynclib().Socket(raw_socket)
@@ -363,8 +367,10 @@ async def create_tcp_server(
     """
     interface, family, v6only = await _networking.get_bind_address(interface)
     raw_socket = socket.socket(family)
-    if v6only:
-        raw_socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, True)
+
+    # Enable/disable dual stack operation as needed
+    if family == socket.AF_INET6:
+        raw_socket.setsockopt(IPPROTO_IPV6, socket.IPV6_V6ONLY, v6only)
 
     sock = _get_asynclib().Socket(raw_socket)
     try:
@@ -550,6 +556,18 @@ def create_queue(capacity: int) -> Queue:
 
     """
     return _get_asynclib().Queue(capacity)
+
+
+def create_capacity_limiter(total_tokens: float) -> CapacityLimiter:
+    """
+    Create a capacity limiter.
+
+    :param total_tokens: the total number of tokens available for borrowing (can be an integer or
+        :data:`math.inf`)
+    :return: a capacity limiter object
+
+    """
+    return _get_asynclib().CapacityLimiter(total_tokens)
 
 
 #
