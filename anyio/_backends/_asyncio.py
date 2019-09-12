@@ -5,6 +5,7 @@ import math
 import os
 import socket
 import sys
+from collections import OrderedDict
 from functools import partial
 from threading import Thread
 from typing import (
@@ -16,7 +17,7 @@ from async_generator import async_generator, yield_, asynccontextmanager, aclosi
 
 from .._networking import BaseSocket
 from .. import abc, claim_worker_thread, _local, T_Retval, TaskInfo
-from ..exceptions import ExceptionGroup, ClosedResourceError, ResourceBusyError
+from ..exceptions import ExceptionGroup, ClosedResourceError, ResourceBusyError, WouldBlock
 
 try:
     from asyncio import run as native_run, create_task, get_running_loop, current_task, all_tasks
@@ -450,7 +451,8 @@ abc.TaskGroup.register(TaskGroup)
 _Retval_Queue_Type = Tuple[Optional[T_Retval], Optional[BaseException]]
 
 
-async def run_in_thread(func: Callable[..., T_Retval], *args) -> T_Retval:
+async def run_in_thread(func: Callable[..., T_Retval], *args,
+                        limiter: Optional['CapacityLimiter'] = None) -> T_Retval:
     def thread_worker():
         try:
             with claim_worker_thread('asyncio'):
@@ -462,15 +464,18 @@ async def run_in_thread(func: Callable[..., T_Retval], *args) -> T_Retval:
             loop.call_soon_threadsafe(queue.put_nowait, (result, None))
 
     check_cancelled()
-    loop = get_running_loop()
-    queue = asyncio.Queue(1)  # type: asyncio.Queue[_Retval_Queue_Type]
-    thread = Thread(target=thread_worker)
-    thread.start()
-    retval, exception = await queue.get()
-    if exception is not None:
-        raise exception
-    else:
-        return cast(T_Retval, retval)
+    async with (limiter or _default_thread_limiter):
+        loop = get_running_loop()
+        queue = asyncio.Queue(1)  # type: asyncio.Queue[_Retval_Queue_Type]
+        thread = Thread(target=thread_worker)
+        thread.start()
+        async with CancelScope(shield=True):
+            retval, exception = await queue.get()
+
+        if exception is not None:
+            raise exception
+        else:
+            return cast(T_Retval, retval)
 
 
 def run_async_from_thread(func: Callable[..., Coroutine[Any, Any, T_Retval]], *args) -> T_Retval:
@@ -704,11 +709,89 @@ class Queue(asyncio.Queue):
         return super().get()
 
 
+class CapacityLimiter:
+    def __init__(self, total_tokens: int):
+        if not isinstance(total_tokens, int) and not math.isinf(total_tokens):
+            raise TypeError('total_tokens must be an int or math.inf')
+        if total_tokens < 1:
+            raise ValueError('total_tokens must be >= 1')
+
+        self._total_tokens = total_tokens
+        self._borrowers = set()  # type: Set[Any]
+        self._wait_queue = OrderedDict()  # type: Dict[Any, asyncio.Event]
+
+    async def __aenter__(self):
+        await self.acquire()
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.release()
+
+    @property
+    def total_tokens(self) -> float:
+        return self._total_tokens
+
+    @property
+    def borrowed_tokens(self) -> int:
+        return len(self._borrowers)
+
+    @property
+    def available_tokens(self) -> float:
+        return self._total_tokens - len(self._borrowers)
+
+    async def acquire_nowait(self) -> None:
+        await self.acquire_on_behalf_of_nowait(current_task())
+
+    async def acquire_on_behalf_of_nowait(self, borrower) -> None:
+        if borrower in self._borrowers:
+            raise RuntimeError("this borrower is already holding one of this CapacityLimiter's "
+                               "tokens")
+
+        if self._wait_queue or len(self._borrowers) >= self._total_tokens:
+            raise WouldBlock
+
+        self._borrowers.add(borrower)
+
+    async def acquire(self) -> None:
+        return await self.acquire_on_behalf_of(current_task())
+
+    async def acquire_on_behalf_of(self, borrower) -> None:
+        try:
+            await self.acquire_on_behalf_of_nowait(borrower)
+        except WouldBlock:
+            event = asyncio.Event()
+            self._wait_queue[borrower] = event
+            try:
+                await event.wait()
+            except BaseException:
+                self._wait_queue.pop(borrower, None)
+                raise
+
+            self._borrowers.add(borrower)
+
+    async def release(self) -> None:
+        await self.release_on_behalf_of(current_task())
+
+    async def release_on_behalf_of(self, borrower) -> None:
+        try:
+            self._borrowers.remove(borrower)
+        except KeyError:
+            raise RuntimeError("this borrower isn't holding any of this CapacityLimiter's "
+                               "tokens") from None
+
+        # Notify the next task in line if this limiter has free capacity now
+        if self._wait_queue and len(self._borrowers) < self._total_tokens:
+            event = self._wait_queue.popitem()[1]
+            event.set()
+
+
+_default_thread_limiter = CapacityLimiter(40)
+
 abc.Lock.register(Lock)
 abc.Condition.register(Condition)
 abc.Event.register(Event)
 abc.Semaphore.register(Semaphore)
 abc.Queue.register(Queue)
+abc.CapacityLimiter.register(CapacityLimiter)
 
 
 #
