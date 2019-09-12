@@ -1,3 +1,9 @@
+anyio (1.1.0-1) unstable; urgency=medium
+
+  * Merge: compat w/ trio 0.12
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Thu, 12 Sep 2019 12:58:41 +0200
+
 anyio (1.0.3-1) unstable; urgency=medium
 
   * Merge
