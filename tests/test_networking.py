@@ -10,12 +10,20 @@ from anyio import (
     create_task_group, connect_tcp, create_udp_socket, connect_unix, create_unix_server,
     create_tcp_server, wait_all_tasks_blocked)
 from anyio.exceptions import (
-    IncompleteRead, DelimiterNotFound, ClosedResourceError, ResourceBusyError)
+    IncompleteRead, DelimiterNotFound, ClosedResourceError, ResourceBusyError, ExceptionGroup)
 
 
 @pytest.fixture(scope='module')
 def localhost():
     return '::1' if socket.has_ipv6 else '127.0.0.1'
+
+
+@pytest.fixture
+def fake_localhost_dns(monkeypatch):
+    # Make it return IPv4 addresses first so we can test the IPv6 preference
+    fake_results = [(socket.AF_INET, socket.SOCK_STREAM, '', ('127.0.0.1', 0)),
+                    (socket.AF_INET6, socket.SOCK_STREAM, '', ('::1', 0))]
+    monkeypatch.setattr('socket.getaddrinfo', lambda *args: fake_results)
 
 
 class TestTCPStream:
@@ -262,6 +270,53 @@ class TestTCPStream:
                         exc.match('already reading from')
                     finally:
                         await tg.cancel_scope.cancel()
+
+    @pytest.mark.skipif(not socket.has_ipv6, reason='IPv6 is not available')
+    @pytest.mark.parametrize('interface, expected_addr', [
+        (None, b'::1'),
+        ('127.0.0.1', b'127.0.0.1'),
+        ('::1', b'::1')
+    ])
+    @pytest.mark.anyio
+    async def test_happy_eyeballs(self, interface, expected_addr, fake_localhost_dns):
+        async def handle_client(stream):
+            addr, port, *rest = stream._socket._raw_socket.getpeername()
+            await stream.send_all(addr.encode() + b'\n')
+
+        async def server():
+            async for stream in stream_server.accept_connections():
+                await tg.spawn(handle_client, stream)
+
+        async with await create_tcp_server(interface=interface) as stream_server:
+            async with create_task_group() as tg:
+                await tg.spawn(server)
+                async with await connect_tcp('localhost', stream_server.port) as client:
+                    assert await client.receive_until(b'\n', 100) == expected_addr
+
+                await stream_server.close()
+
+    @pytest.mark.parametrize('target, exception_class', [
+        pytest.param(
+            'localhost', ExceptionGroup,
+            marks=[pytest.mark.skipif(not socket.has_ipv6, reason='IPv6 is not available')]
+        ),
+        ('127.0.0.1', ConnectionRefusedError)
+    ], ids=['multi', 'single'])
+    @pytest.mark.anyio
+    async def test_connrefused(self, target, exception_class, fake_localhost_dns):
+        dummy_socket = socket.socket(socket.AF_INET6)
+        dummy_socket.bind(('::', 0))
+        free_port = dummy_socket.getsockname()[1]
+        dummy_socket.close()
+
+        with pytest.raises(OSError) as exc:
+            await connect_tcp(target, free_port)
+
+        assert exc.match('All connection attempts failed')
+        assert isinstance(exc.value.__cause__, exception_class)
+        if exception_class is ExceptionGroup:
+            for exc in exc.value.__cause__.exceptions:
+                assert isinstance(exc, ConnectionRefusedError)
 
 
 class TestUNIXStream:

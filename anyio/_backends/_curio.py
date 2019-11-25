@@ -1,7 +1,9 @@
 import math
 import socket
 from collections import OrderedDict
+from concurrent.futures import Future
 from functools import partial
+from threading import Thread
 from typing import Callable, Set, Optional, Coroutine, Any, cast, Dict, List, Sequence
 from weakref import WeakKeyDictionary
 
@@ -12,9 +14,10 @@ import curio.ssl
 import curio.traps
 from async_generator import async_generator, asynccontextmanager, yield_
 
+from .. import abc, T_Retval, claim_worker_thread, TaskInfo, _local
+from ..exceptions import (
+    ExceptionGroup as BaseExceptionGroup, ClosedResourceError, ResourceBusyError, WouldBlock)
 from .._networking import BaseSocket
-from .. import abc, T_Retval, claim_worker_thread, TaskInfo
-from ..exceptions import ExceptionGroup, ClosedResourceError, ResourceBusyError, WouldBlock
 
 
 #
@@ -58,7 +61,7 @@ CancelledError = curio.TaskCancelled
 
 class CancelScope:
     __slots__ = ('_deadline', '_shield', '_parent_scope', '_cancel_called', '_active',
-                 '_timeout_task', '_tasks', '_timeout_expired')
+                 '_timeout_task', '_tasks', '_host_task', '_timeout_expired')
 
     def __init__(self, deadline: float = math.inf, shield: bool = False):
         self._deadline = deadline
@@ -68,6 +71,7 @@ class CancelScope:
         self._active = False
         self._timeout_task = None
         self._tasks = set()  # type: Set[curio.Task]
+        self._host_task = None  # type: Optional[curio.Task]
         self._timeout_expired = False
 
     async def __aenter__(self):
@@ -81,13 +85,13 @@ class CancelScope:
                 "Each CancelScope may only be used for a single 'async with' block"
             )
 
-        host_task = await curio.current_task()
-        self._tasks.add(host_task)
+        self._host_task = await curio.current_task()
+        self._tasks.add(self._host_task)
         try:
-            task_state = _task_states[host_task]
+            task_state = _task_states[self._host_task]
         except KeyError:
             task_state = TaskState(self)
-            _task_states[host_task] = task_state
+            _task_states[self._host_task] = task_state
         else:
             self._parent_scope = task_state.cancel_scope
             task_state.cancel_scope = self
@@ -105,9 +109,10 @@ class CancelScope:
         if self._timeout_task:
             await self._timeout_task.cancel(blocking=False)
 
-        host_task = await curio.current_task()
-        self._tasks.remove(host_task)
-        _task_states[host_task].cancel_scope = self._parent_scope
+        self._tasks.remove(self._host_task)
+        host_task_state = _task_states.get(self._host_task)
+        if host_task_state is not None and host_task_state.cancel_scope is self:
+            host_task_state.cancel_scope = self._parent_scope
 
         exceptions = exc_val.exceptions if isinstance(exc_val, ExceptionGroup) else [exc_val]
         if all(isinstance(exc, CancelledError) for exc in exceptions):
@@ -249,7 +254,7 @@ _task_states = WeakKeyDictionary()  # type: WeakKeyDictionary[curio.Task, TaskSt
 # Task groups
 #
 
-class CurioExceptionGroup(ExceptionGroup):
+class ExceptionGroup(BaseExceptionGroup):
     def __init__(self, exceptions: Sequence[BaseException]):
         super().__init__()
         self.exceptions = exceptions
@@ -286,7 +291,7 @@ class TaskGroup:
             exceptions = self._exceptions
 
         if len(exceptions) > 1:
-            raise CurioExceptionGroup(exceptions)
+            raise ExceptionGroup(exceptions)
         elif exceptions and exceptions[0] is not exc_val:
             raise exceptions[0]
 
@@ -325,24 +330,59 @@ abc.TaskGroup.register(TaskGroup)
 # Threads
 #
 
-async def run_in_thread(func: Callable[..., T_Retval], *args,
+async def run_in_thread(func: Callable[..., T_Retval], *args, cancellable: bool = False,
                         limiter: Optional['CapacityLimiter'] = None) -> T_Retval:
+    async def async_call_helper():
+        while True:
+            item = await queue.get()
+            if item is None:
+                await limiter.release_on_behalf_of(task)
+                await finish_event.set()
+                return
+
+            func_, args_, f = item  # type: Callable, tuple, Future
+            try:
+                retval_ = await func_(*args_)
+            except BaseException as exc_:
+                f.set_exception(exc_)
+            else:
+                f.set_result(retval_)
+
     def thread_worker():
-        with claim_worker_thread('curio'):
-            return func(*args)
+        nonlocal retval, exception
+        try:
+            with claim_worker_thread('curio'):
+                _local.queue = queue
+                retval = func(*args)
+        except BaseException as exc:
+            exception = exc
+        finally:
+            if not helper_task.cancelled:
+                queue.put(None)
 
     await check_cancelled()
-    async with (limiter or _default_thread_limiter):
-        thread = await curio.spawn_thread(thread_worker)
-        try:
-            async with CancelScope(shield=True):
-                return await thread.join()
-        except curio.TaskError as exc:
-            raise exc.__cause__ from None
+    task = await curio.current_task()
+    queue = curio.UniversalQueue(maxsize=1)
+    finish_event = curio.Event()
+    retval, exception = None, None
+    limiter = limiter or _default_thread_limiter
+    await limiter.acquire_on_behalf_of(task)
+    thread = Thread(target=thread_worker, daemon=True)
+    helper_task = await curio.spawn(async_call_helper, daemon=True, report_crash=False)
+    thread.start()
+    async with CancelScope(shield=not cancellable):
+        await finish_event.wait()
+
+    if exception is not None:
+        raise exception
+    else:
+        return cast(T_Retval, retval)
 
 
 def run_async_from_thread(func: Callable[..., T_Retval], *args) -> T_Retval:
-    return curio.AWAIT(func(*args))
+    future = Future()  # type: Future[T_Retval]
+    _local.queue.put((func, args, future))
+    return future.result()
 
 
 #
@@ -472,13 +512,8 @@ class Queue(curio.Queue):
 
 
 class CapacityLimiter:
-    def __init__(self, total_tokens: int):
-        if not isinstance(total_tokens, int) and not math.isinf(total_tokens):
-            raise TypeError('total_tokens must be an int or math.inf')
-        if total_tokens < 1:
-            raise ValueError('total_tokens must be >= 1')
-
-        self._total_tokens = total_tokens
+    def __init__(self, total_tokens: float):
+        self._set_total_tokens(total_tokens)
         self._borrowers = set()  # type: Set[Any]
         self._wait_queue = OrderedDict()  # type: Dict[Any, curio.Event]
 
@@ -488,9 +523,32 @@ class CapacityLimiter:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.release()
 
+    def _set_total_tokens(self, value: float) -> None:
+        if not isinstance(value, int) and not math.isinf(value):
+            raise TypeError('total_tokens must be an int or math.inf')
+        if value < 1:
+            raise ValueError('total_tokens must be >= 1')
+
+        self._total_tokens = value
+
     @property
     def total_tokens(self) -> float:
         return self._total_tokens
+
+    async def set_total_tokens(self, value: float) -> None:
+        old_value = self._total_tokens
+        self._set_total_tokens(value)
+        events = []
+        for event in self._wait_queue.values():
+            if value <= old_value:
+                break
+
+            if not event.is_set():
+                events.append(event)
+                old_value += 1
+
+        for event in events:
+            await event.set()
 
     @property
     def borrowed_tokens(self) -> int:
@@ -544,6 +602,10 @@ class CapacityLimiter:
         if self._wait_queue and len(self._borrowers) < self._total_tokens:
             event = self._wait_queue.popitem()[1]
             await event.set()
+
+
+def current_default_thread_limiter():
+    return _default_thread_limiter
 
 
 _default_thread_limiter = CapacityLimiter(40)
