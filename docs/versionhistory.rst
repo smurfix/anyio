@@ -3,6 +3,22 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
+**1.2.0**
+
+- Added the possibility to parametrize regular pytest test functions against the selected list of
+  backends
+- Added the ``set_total_tokens()`` method to ``CapacityLimiter``
+- Added the ``anyio.current_default_thread_limiter()`` function
+- Added the ``cancellable`` parameter to ``anyio.run_in_thread()``
+- Implemented the Happy Eyeballs (:rfc:`6555`) algorithm for ``anyio.connect_tcp()``
+- Fixed ``KeyError`` on asyncio and curio where entering and exiting a cancel scope happens in
+  different tasks
+- Fixed deprecation warnings on Python 3.8 about the ``loop`` argument of ``asyncio.Event()``
+- Forced the use ``WindowsSelectorEventLoopPolicy`` in ``asyncio.run`` when on Windows and asyncio
+  to keep network functionality working
+- Worker threads are now spawned with ``daemon=True`` on all backends, not just trio
+- Dropped support for trio v0.11
+
 **1.1.0**
 
 - Added the ``lock`` parameter to ``anyio.create_condition()`` (PR by Matthias Urlichs)

@@ -1,25 +1,15 @@
-from typing import Callable, Optional, List
+from typing import Callable, Optional, List, Union
 
 import trio.hazmat
+import trio.from_thread
 from async_generator import async_generator, yield_, asynccontextmanager, aclosing
+from trio.to_thread import run_sync
+from trio.hazmat import wait_readable, wait_writable, notify_closing
 
+from .. import abc, claim_worker_thread, T_Retval, TaskInfo
+from ..exceptions import (
+    ExceptionGroup as BaseExceptionGroup, ClosedResourceError, ResourceBusyError, WouldBlock)
 from .._networking import BaseSocket
-from .. import abc, claim_worker_thread, T_Retval, _local, TaskInfo
-from ..exceptions import ExceptionGroup, ClosedResourceError, ResourceBusyError, WouldBlock
-
-try:
-    # Trio >= 0.12
-    from trio.to_thread import run_sync
-    from trio.from_thread import run as run_async_from_thread
-    from trio.hazmat import wait_readable, wait_writable, notify_closing
-except ImportError:
-    # Trio < 0.12
-    from trio import run_sync_in_worker_thread as run_sync
-    from trio.hazmat import (
-        wait_socket_readable as wait_readable, wait_socket_writable as wait_writable,
-        notify_socket_close as notify_closing
-    )
-    run_async_from_thread = None
 
 #
 # Event loop
@@ -111,7 +101,7 @@ async def current_time():
 # Task groups
 #
 
-class TrioExceptionGroup(ExceptionGroup, trio.MultiError):
+class ExceptionGroup(BaseExceptionGroup, trio.MultiError):
     pass
 
 
@@ -133,7 +123,7 @@ class TaskGroup:
         try:
             return await self._nursery_manager.__aexit__(exc_type, exc_val, exc_tb)
         except trio.MultiError as exc:
-            raise TrioExceptionGroup(exc.exceptions) from None
+            raise ExceptionGroup(exc.exceptions) from None
         finally:
             self._active = False
 
@@ -151,29 +141,16 @@ abc.TaskGroup.register(TaskGroup)
 # Threads
 #
 
-if run_async_from_thread:
-    async def run_in_thread(func: Callable[..., T_Retval], *args,
-                            limiter: Optional['CapacityLimiter'] = None) -> T_Retval:
-        def wrapper():
-            with claim_worker_thread('trio'):
-                return func(*args)
+async def run_in_thread(func: Callable[..., T_Retval], *args, cancellable: bool = False,
+                        limiter: Optional['CapacityLimiter'] = None) -> T_Retval:
+    def wrapper():
+        with claim_worker_thread('trio'):
+            return func(*args)
 
-        trio_limiter = getattr(limiter, '_limiter', None)
-        return await run_sync(wrapper, limiter=trio_limiter)
-else:
-    async def run_in_thread(func: Callable[..., T_Retval], *args,
-                            limiter: Optional['CapacityLimiter'] = None) -> T_Retval:
-        def wrapper():
-            with claim_worker_thread('trio'):
-                _local.portal = portal
-                return func(*args)
+    trio_limiter = getattr(limiter, '_limiter', None)
+    return await run_sync(wrapper, cancellable=cancellable, limiter=trio_limiter)
 
-        portal = trio.BlockingTrioPortal()
-        trio_limiter = getattr(limiter, '_limiter', None)
-        return await run_sync(wrapper, limiter=trio_limiter)
-
-    def run_async_from_thread(func: Callable[..., T_Retval], *args) -> T_Retval:
-        return _local.portal.run(func, *args)
+run_async_from_thread = trio.from_thread.run
 
 
 #
@@ -295,8 +272,11 @@ class Queue:
 
 
 class CapacityLimiter(abc.CapacityLimiter):
-    def __init__(self, total_tokens: int):
-        self._limiter = trio.CapacityLimiter(total_tokens)
+    def __init__(self, limiter_or_tokens: Union[float, trio.CapacityLimiter]):
+        if isinstance(limiter_or_tokens, trio.CapacityLimiter):
+            self._limiter = limiter_or_tokens
+        else:
+            self._limiter = trio.CapacityLimiter(limiter_or_tokens)
 
     async def __aenter__(self) -> 'CapacityLimiter':
         await self._limiter.__aenter__()
@@ -308,6 +288,9 @@ class CapacityLimiter(abc.CapacityLimiter):
     @property
     def total_tokens(self) -> float:
         return self._limiter.total_tokens
+
+    async def set_total_tokens(self, value: float) -> None:
+        self._limiter.total_tokens = value
 
     @property
     def borrowed_tokens(self) -> int:
@@ -337,6 +320,11 @@ class CapacityLimiter(abc.CapacityLimiter):
 
     async def release_on_behalf_of(self, borrower):
         self._limiter.release_on_behalf_of(borrower)
+
+
+def current_default_thread_limiter():
+    native_limiter = trio.to_thread.current_default_thread_limiter()
+    return CapacityLimiter(native_limiter)
 
 
 abc.Lock.register(Lock)

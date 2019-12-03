@@ -15,84 +15,15 @@ from weakref import WeakKeyDictionary
 
 from async_generator import async_generator, yield_, asynccontextmanager, aclosing
 
-from .._networking import BaseSocket
 from .. import abc, claim_worker_thread, _local, T_Retval, TaskInfo
-from ..exceptions import ExceptionGroup, ClosedResourceError, ResourceBusyError, WouldBlock
+from ..exceptions import (
+    ExceptionGroup as BaseExceptionGroup, ClosedResourceError, ResourceBusyError, WouldBlock)
+from .._networking import BaseSocket
 
 try:
-    from asyncio import run as native_run, create_task, get_running_loop, current_task, all_tasks
+    from asyncio import create_task, get_running_loop, current_task, all_tasks
 except ImportError:
     _T = TypeVar('_T')
-
-    # Snatched from the standard library
-    def native_run(main: Awaitable[_T], *, debug: bool = False) -> _T:
-        """Run a coroutine.
-
-        This function runs the passed coroutine, taking care of
-        managing the asyncio event loop and finalizing asynchronous
-        generators.
-
-        This function cannot be called when another asyncio event loop is
-        running in the same thread.
-
-        If debug is True, the event loop will be run in debug mode.
-
-        This function always creates a new event loop and closes it at the end.
-        It should be used as a main entry point for asyncio programs, and should
-        ideally only be called once.
-
-        Example:
-
-            async def main():
-                await asyncio.sleep(1)
-                print('hello')
-
-            asyncio.run(main())
-        """
-        from asyncio import events, coroutines
-
-        if events._get_running_loop() is not None:
-            raise RuntimeError(
-                "asyncio.run() cannot be called from a running event loop")
-
-        if not coroutines.iscoroutine(main):
-            raise ValueError("a coroutine was expected, got {!r}".format(main))
-
-        loop = events.new_event_loop()
-        try:
-            events.set_event_loop(loop)
-            loop.set_debug(debug)
-            return loop.run_until_complete(main)
-        finally:
-            try:
-                _cancel_all_tasks(loop)
-                loop.run_until_complete(loop.shutdown_asyncgens())
-            finally:
-                events.set_event_loop(None)  # type: ignore
-                loop.close()
-
-    def _cancel_all_tasks(loop):
-        from asyncio import gather
-
-        to_cancel = all_tasks(loop)
-        if not to_cancel:
-            return
-
-        for task in to_cancel:
-            task.cancel()
-
-        loop.run_until_complete(
-            gather(*to_cancel, loop=loop, return_exceptions=True))
-
-        for task in to_cancel:
-            if task.cancelled():
-                continue
-            if task.exception() is not None:
-                loop.call_exception_handler({
-                    'message': 'unhandled exception during asyncio.run() shutdown',
-                    'exception': task.exception(),
-                    'task': task,
-                })
 
     def create_task(coro: Union[Generator[Any, None, _T], Awaitable[_T]]) -> asyncio.Task:
         return get_running_loop().create_task(coro)
@@ -146,11 +77,21 @@ def run(func: Callable[..., T_Retval], *args, debug: bool = False, use_uvloop: b
         else:
             policy = uvloop.EventLoopPolicy()
 
+    # Must be explicitly set on Python 3.8 for now or wait_socket_(readable|writable) won't work
+    if policy is None and sys.platform == 'win32' and sys.version_info >= (3, 8):
+        policy = asyncio.WindowsSelectorEventLoopPolicy()  # type: ignore
+
     if policy is not None:
         asyncio.set_event_loop_policy(policy)
 
+    # We use loop.run_until_complete() instead of asyncio.run() because the latter cancels all
+    # tasks and shuts down all async generators, making it unsuitable for things like pytest
+    # fixtures which require one run() call for setup, one for the actual test and one for
+    # teardown.
     exception = retval = None
-    native_run(wrapper(), debug=debug)
+    loop = asyncio.get_event_loop()
+    loop.set_debug(debug)
+    loop.run_until_complete(wrapper())
     if exception is not None:
         raise exception
     else:
@@ -178,7 +119,7 @@ CancelledError = asyncio.CancelledError
 
 class CancelScope:
     __slots__ = ('_deadline', '_shield', '_parent_scope', '_cancel_called', '_active',
-                 '_timeout_task', '_tasks', '_timeout_expired')
+                 '_timeout_task', '_tasks', '_host_task', '_timeout_expired')
 
     def __init__(self, deadline: float = math.inf, shield: bool = False):
         self._deadline = deadline
@@ -188,6 +129,7 @@ class CancelScope:
         self._active = False
         self._timeout_task = None
         self._tasks = set()  # type: Set[asyncio.Task]
+        self._host_task = None  # type: Optional[asyncio.Task]
         self._timeout_expired = False
 
     async def __aenter__(self):
@@ -201,14 +143,14 @@ class CancelScope:
                 "Each CancelScope may only be used for a single 'async with' block"
             )
 
-        host_task = current_task()
-        self._tasks.add(host_task)
+        self._host_task = current_task()
+        self._tasks.add(self._host_task)
         try:
-            task_state = _task_states[host_task]
+            task_state = _task_states[self._host_task]
         except KeyError:
-            task_name = host_task.get_name() if _native_task_names else None
+            task_name = self._host_task.get_name() if _native_task_names else None
             task_state = TaskState(None, task_name, self)
-            _task_states[host_task] = task_state
+            _task_states[self._host_task] = task_state
         else:
             self._parent_scope = task_state.cancel_scope
             task_state.cancel_scope = self
@@ -226,9 +168,10 @@ class CancelScope:
         if self._timeout_task:
             self._timeout_task.cancel()
 
-        host_task = current_task()
-        self._tasks.remove(host_task)
-        _task_states[host_task].cancel_scope = self._parent_scope
+        self._tasks.remove(self._host_task)
+        host_task_state = _task_states.get(self._host_task)
+        if host_task_state is not None and host_task_state.cancel_scope is self:
+            host_task_state.cancel_scope = self._parent_scope
 
         exceptions = exc_val.exceptions if isinstance(exc_val, ExceptionGroup) else [exc_val]
         if all(isinstance(exc, CancelledError) for exc in exceptions):
@@ -373,7 +316,7 @@ _task_states = WeakKeyDictionary()  # type: WeakKeyDictionary[asyncio.Task, Task
 # Task groups
 #
 
-class AsyncioExceptionGroup(ExceptionGroup):
+class ExceptionGroup(BaseExceptionGroup):
     def __init__(self, exceptions: Sequence[BaseException]):
         super().__init__()
         self.exceptions = exceptions
@@ -409,7 +352,7 @@ class TaskGroup:
             exceptions = self._exceptions
 
         if len(exceptions) > 1:
-            raise AsyncioExceptionGroup(exceptions)
+            raise ExceptionGroup(exceptions)
         elif exceptions and exceptions[0] is not exc_val:
             raise exceptions[0]
 
@@ -451,7 +394,7 @@ abc.TaskGroup.register(TaskGroup)
 _Retval_Queue_Type = Tuple[Optional[T_Retval], Optional[BaseException]]
 
 
-async def run_in_thread(func: Callable[..., T_Retval], *args,
+async def run_in_thread(func: Callable[..., T_Retval], *args, cancellable: bool = False,
                         limiter: Optional['CapacityLimiter'] = None) -> T_Retval:
     def thread_worker():
         try:
@@ -459,23 +402,35 @@ async def run_in_thread(func: Callable[..., T_Retval], *args,
                 _local.loop = loop
                 result = func(*args)
         except BaseException as exc:
-            loop.call_soon_threadsafe(queue.put_nowait, (None, exc))
+            if not loop.is_closed():
+                asyncio.run_coroutine_threadsafe(limiter.release_on_behalf_of(task), loop)
+                if not cancelled:
+                    loop.call_soon_threadsafe(queue.put_nowait, (None, exc))
         else:
-            loop.call_soon_threadsafe(queue.put_nowait, (result, None))
+            if not loop.is_closed():
+                asyncio.run_coroutine_threadsafe(limiter.release_on_behalf_of(task), loop)
+                if not cancelled:
+                    loop.call_soon_threadsafe(queue.put_nowait, (result, None))
 
     check_cancelled()
-    async with (limiter or _default_thread_limiter):
-        loop = get_running_loop()
-        queue = asyncio.Queue(1)  # type: asyncio.Queue[_Retval_Queue_Type]
-        thread = Thread(target=thread_worker)
-        thread.start()
-        async with CancelScope(shield=True):
+    loop = get_running_loop()
+    task = current_task()
+    queue = asyncio.Queue(1)  # type: asyncio.Queue[_Retval_Queue_Type]
+    cancelled = False
+    limiter = limiter or _default_thread_limiter
+    await limiter.acquire_on_behalf_of(task)
+    thread = Thread(target=thread_worker, daemon=True)
+    thread.start()
+    async with CancelScope(shield=not cancellable):
+        try:
             retval, exception = await queue.get()
+        finally:
+            cancelled = True
 
-        if exception is not None:
-            raise exception
-        else:
-            return cast(T_Retval, retval)
+    if exception is not None:
+        raise exception
+    else:
+        return cast(T_Retval, retval)
 
 
 def run_async_from_thread(func: Callable[..., Coroutine[Any, Any, T_Retval]], *args) -> T_Retval:
@@ -569,8 +524,8 @@ class Socket(BaseSocket):
     def __init__(self, raw_socket: socket.SocketType) -> None:
         super().__init__(raw_socket)
         self._loop = get_running_loop()
-        self._read_event = asyncio.Event(loop=self._loop)
-        self._write_event = asyncio.Event(loop=self._loop)
+        self._read_event = asyncio.Event()
+        self._write_event = asyncio.Event()
 
     def _wait_readable(self):
         return wait_socket_readable(self._raw_socket)
@@ -594,8 +549,8 @@ async def wait_socket_readable(sock: socket.SocketType) -> None:
         raise ResourceBusyError('reading from') from None
 
     loop = get_running_loop()
-    event = _read_events[sock] = asyncio.Event(loop=loop)
-    loop.add_reader(sock, event.set)
+    event = _read_events[sock] = asyncio.Event()
+    get_running_loop().add_reader(sock, event.set)
     try:
         await event.wait()
     finally:
@@ -615,7 +570,7 @@ async def wait_socket_writable(sock: socket.SocketType) -> None:
         raise ResourceBusyError('writing to') from None
 
     loop = get_running_loop()
-    event = _write_events[sock] = asyncio.Event(loop=loop)
+    event = _write_events[sock] = asyncio.Event()
     loop.add_writer(sock.fileno(), event.set)
     try:
         await event.wait()
@@ -710,13 +665,8 @@ class Queue(asyncio.Queue):
 
 
 class CapacityLimiter:
-    def __init__(self, total_tokens: int):
-        if not isinstance(total_tokens, int) and not math.isinf(total_tokens):
-            raise TypeError('total_tokens must be an int or math.inf')
-        if total_tokens < 1:
-            raise ValueError('total_tokens must be >= 1')
-
-        self._total_tokens = total_tokens
+    def __init__(self, total_tokens: float):
+        self._set_total_tokens(total_tokens)
         self._borrowers = set()  # type: Set[Any]
         self._wait_queue = OrderedDict()  # type: Dict[Any, asyncio.Event]
 
@@ -726,9 +676,32 @@ class CapacityLimiter:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.release()
 
+    def _set_total_tokens(self, value: float) -> None:
+        if not isinstance(value, int) and not math.isinf(value):
+            raise TypeError('total_tokens must be an int or math.inf')
+        if value < 1:
+            raise ValueError('total_tokens must be >= 1')
+
+        self._total_tokens = value
+
     @property
     def total_tokens(self) -> float:
         return self._total_tokens
+
+    async def set_total_tokens(self, value: float) -> None:
+        old_value = self._total_tokens
+        self._set_total_tokens(value)
+        events = []
+        for event in self._wait_queue.values():
+            if value <= old_value:
+                break
+
+            if not event.is_set():
+                events.append(event)
+                old_value += 1
+
+        for event in events:
+            event.set()
 
     @property
     def borrowed_tokens(self) -> int:
@@ -784,6 +757,10 @@ class CapacityLimiter:
             event.set()
 
 
+def current_default_thread_limiter():
+    return _default_thread_limiter
+
+
 _default_thread_limiter = CapacityLimiter(40)
 
 abc.Lock.register(Lock)
@@ -808,7 +785,7 @@ async def receive_signals(*signals: int):
             await yield_(signum)
 
     loop = get_running_loop()
-    queue = asyncio.Queue(loop=loop)  # type: asyncio.Queue[int]
+    queue = asyncio.Queue()  # type: asyncio.Queue[int]
     handled_signals = set()
     agen = process_signal_queue()
     try:

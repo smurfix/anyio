@@ -6,8 +6,9 @@ import threading
 import typing
 from contextlib import contextmanager
 from importlib import import_module
+from ipaddress import ip_address, IPv6Address
 from ssl import SSLContext
-from typing import TypeVar, Callable, Union, Optional, Awaitable, Coroutine, Any, Dict
+from typing import TypeVar, Callable, Union, Optional, Awaitable, Coroutine, Any, Dict, List, Tuple
 
 import sniffio
 
@@ -214,19 +215,24 @@ def create_task_group() -> TaskGroup:
 # Threads
 #
 
-def run_in_thread(func: Callable[..., T_Retval], *args,
+def run_in_thread(func: Callable[..., T_Retval], *args, cancellable: bool = False,
                   limiter: Optional[CapacityLimiter] = None) -> Awaitable[T_Retval]:
     """
     Start a thread that calls the given function with the given arguments.
 
+    If the ``cancellable`` option is enabled and the task waiting for its completion is cancelled,
+    the thread will still run its course but its return value (or any raised exception) will be
+    ignored.
+
     :param func: a callable
     :param args: positional arguments for the callable
+    :param cancellable: ``True`` to allow cancellation of the operation
     :param limiter: capacity limiter to use to limit the total amount of threads running
         (if omitted, the default limiter is used)
     :return: an awaitable that yields the return value of the function.
 
     """
-    return _get_asynclib().run_in_thread(func, *args, limiter=limiter)
+    return _get_asynclib().run_in_thread(func, *args, cancellable=cancellable, limiter=limiter)
 
 
 def run_async_from_thread(func: Callable[..., Coroutine[Any, Any, T_Retval]], *args) -> T_Retval:
@@ -244,6 +250,16 @@ def run_async_from_thread(func: Callable[..., Coroutine[Any, Any, T_Retval]], *a
         raise RuntimeError('This function can only be run from an AnyIO worker thread')
 
     return asynclib.run_async_from_thread(func, *args)
+
+
+def current_default_thread_limiter() -> CapacityLimiter:
+    """
+    Return the capacity limiter that is used by default to limit the number of concurrent threads.
+
+    :return: a capacity limiter object
+
+    """
+    return _get_asynclib().current_default_thread_limiter()
 
 
 #
@@ -276,10 +292,17 @@ def aopen(file: Union[str, 'os.PathLike', int], mode: str = 'r', buffering: int 
 async def connect_tcp(
     address: IPAddressType, port: int, *, ssl_context: Optional[SSLContext] = None,
     autostart_tls: bool = False, bind_host: Optional[IPAddressType] = None,
-    bind_port: Optional[int] = None, tls_standard_compatible: bool = True
+    bind_port: Optional[int] = None, tls_standard_compatible: bool = True,
+    happy_eyeballs_delay: float = 0.25
 ) -> SocketStream:
     """
     Connect to a host using the TCP protocol.
+
+    This function implements the stateless version of the Happy Eyeballs algorithm (RFC 6555).
+    If ``address`` is a host name that resolves to multiple IP addresses, each one is tried until
+    one connection attempt succeeds. If the first attempt does not connected within 250
+    milliseconds, a second attempt is started using the next address in the list, and so on.
+    For IPv6 enabled systems, IPv6 addresses are tried first.
 
     :param address: the IP address or host name to connect to
     :param port: port on the target host to connect to
@@ -292,34 +315,90 @@ async def connect_tcp(
         :exc:`~ssl.SSLEOFError` may be raised during reads from the stream.
         Some protocols, such as HTTP, require this option to be ``False``.
         See :meth:`~ssl.SSLContext.wrap_socket` for details.
+    :param happy_eyeballs_delay: delay (in seconds) before starting the next connection attempt
     :return: a socket stream object
+    :raises OSError: if the connection attempt fails
 
     """
+    # Placed here due to https://github.com/python/mypy/issues/7057
+    stream = None  # type: Optional[SocketStream]
+
+    async def try_connect(af: int, addr: str, event: Event):
+        nonlocal stream
+        raw_socket = socket.socket(af, socket.SOCK_STREAM)
+        sock = asynclib.Socket(raw_socket)
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            if interface is not None and bind_port is not None:
+                await sock.bind((interface, bind_port))
+
+            await sock.connect((addr, port))
+        except OSError as exc:
+            oserrors.append(exc)
+            await sock.close()
+            return
+        except BaseException:
+            await sock.close()
+            raise
+        else:
+            assert stream is None
+            stream = _networking.SocketStream(sock, ssl_context, target_host,
+                                              tls_standard_compatible)
+        finally:
+            await event.set()
+
+    asynclib = _get_asynclib()
     interface, family = None, 0  # type: Optional[str], int
     if bind_host:
         interface, family, _v6only = await _networking.get_bind_address(bind_host)
 
-    # getaddrinfo() will raise an exception if name resolution fails
-    address = str(address)
-    addrlist = await run_in_thread(socket.getaddrinfo, address, port, family, socket.SOCK_STREAM)
-    family, type_, proto, _cn, sa = addrlist[0]
-    raw_socket = socket.socket(family, type_, proto)
-    sock = _get_asynclib().Socket(raw_socket)
+    target_host = str(address)
     try:
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        if interface is not None and bind_port is not None:
-            await sock.bind((interface, bind_port))
+        addr_obj = ip_address(address)
+    except ValueError:
+        # getaddrinfo() will raise an exception if name resolution fails
+        resolved = await run_in_thread(socket.getaddrinfo, target_host, port, family,
+                                       socket.SOCK_STREAM, cancellable=True)
 
-        await sock.connect(sa)
-        stream = _networking.SocketStream(sock, ssl_context, address, tls_standard_compatible)
+        # Organize the list so that the first address is an IPv6 address (if available) and the
+        # second one is an IPv4 addresses. The rest can be in whatever order.
+        v6_found = v4_found = False
+        target_addrs = []  # type: List[Tuple[socket.AddressFamily, str]]
+        for af, *rest, sa in resolved:
+            if af == socket.AF_INET6 and not v6_found:
+                v6_found = True
+                target_addrs.insert(0, (af, sa[0]))
+            elif af == socket.AF_INET and not v4_found and v6_found:
+                v4_found = True
+                target_addrs.insert(1, (af, sa[0]))
+            else:
+                target_addrs.append((af, sa[0]))
+    else:
+        if isinstance(addr_obj, IPv6Address):
+            target_addrs = [(socket.AF_INET6, addr_obj.compressed)]
+        else:
+            target_addrs = [(socket.AF_INET, addr_obj.compressed)]
 
-        if autostart_tls:
-            await stream.start_tls()
+    oserrors = []  # type: List[OSError]
+    async with create_task_group() as tg:
+        for i, (af, addr) in enumerate(target_addrs):
+            event = create_event()
+            await tg.spawn(try_connect, af, addr, event)
+            async with move_on_after(happy_eyeballs_delay):
+                await event.wait()
 
-        return stream
-    except BaseException:
-        await sock.close()
-        raise
+            if stream is not None:
+                await tg.cancel_scope.cancel()
+                break
+
+    if stream is None:
+        cause = oserrors[0] if len(oserrors) == 1 else asynclib.ExceptionGroup(oserrors)
+        raise OSError('All connection attempts failed') from cause
+
+    if autostart_tls:
+        await stream.start_tls()
+
+    return stream
 
 
 async def connect_unix(path: Union[str, 'os.PathLike']) -> SocketStream:
