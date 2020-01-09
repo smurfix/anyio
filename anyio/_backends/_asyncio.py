@@ -187,8 +187,15 @@ class CancelScope:
             # Cancel the task directly, but only if it's blocked and isn't within a shielded scope
             cancel_scope = _task_states[task].cancel_scope
             if cancel_scope is self:
-                # Only deliver the cancellation if the task is already running
-                if task._coro.cr_await is not None:
+                # Only deliver the cancellation if the task is already running (but not this task!)
+                try:
+                    running = task._coro.cr_running
+                    awaitable = task._coro.cr_await
+                except AttributeError:
+                    running = task._coro.gi_running
+                    awaitable = task._coro.gi_yieldfrom
+
+                if not running and awaitable is not None:
                     task.cancel()
             elif not cancel_scope._shielded_to(self):
                 await cancel_scope._cancel()
@@ -216,7 +223,7 @@ class CancelScope:
 
         return False
 
-    async def cancel(self):
+    async def cancel(self) -> None:
         if self._cancel_called:
             return
 
@@ -347,7 +354,7 @@ class TaskGroup:
 
         self._active = False
         if not self.cancel_scope._parent_cancelled():
-            exceptions = [exc for exc in self._exceptions if not isinstance(exc, CancelledError)]
+            exceptions = self._filter_cancellation_errors(self._exceptions)
         else:
             exceptions = self._exceptions
 
@@ -357,6 +364,22 @@ class TaskGroup:
             raise exceptions[0]
 
         return ignore_exception
+
+    @staticmethod
+    def _filter_cancellation_errors(exceptions: Sequence[BaseException]) -> List[BaseException]:
+        filtered_exceptions = []  # type: List[BaseException]
+        for exc in exceptions:
+            if isinstance(exc, ExceptionGroup):
+                exc.exceptions = TaskGroup._filter_cancellation_errors(exc.exceptions)
+                if exc.exceptions:
+                    if len(exc.exceptions) > 1:
+                        filtered_exceptions.append(exc)
+                    else:
+                        filtered_exceptions.append(exc.exceptions[0])
+            elif not isinstance(exc, CancelledError):
+                filtered_exceptions.append(exc)
+
+        return filtered_exceptions
 
     async def _run_wrapped_task(self, func: Callable[..., Coroutine], args: tuple) -> None:
         task = current_task()
@@ -828,8 +851,14 @@ async def wait_all_tasks_blocked() -> None:
     this_task = current_task()
     while True:
         for task in all_tasks():
-            if task._coro.cr_await is None and task is not this_task:  # type: ignore
-                await sleep(0)
-                break
+            if task is not this_task:
+                try:
+                    awaitable = task._coro.cr_await  # type: ignore
+                except AttributeError:
+                    awaitable = task._coro.gi_yieldfrom  # type: ignore
+
+                if awaitable is None:
+                    await sleep(0)
+                    break
         else:
             return

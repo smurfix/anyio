@@ -3,6 +3,29 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
+**1.2.3**
+
+- Repackaged release (v1.2.2 contained extra files from an experimental
+  branch which broke imports)
+
+**1.2.2**
+
+- Fixed ``CancelledError`` leaking from a cancel scope on asyncio if the task previously received a
+  cancellation exception
+- Fixed ``AttributeError`` when cancelling a generator-based task (asyncio)
+- Fixed ``wait_all_tasks_blocked()`` not working with generator-based tasks (asyncio)
+- Fixed an unnecessary delay in ``connect_tcp()`` if an earlier attempt succeeds
+- Fixed ``AssertionError`` in ``connect_tcp()`` if multiple connection attempts succeed
+  simultaneously
+
+**1.2.1**
+
+- Fixed cancellation errors leaking from a task group when they are contained in an exception group
+- Fixed trio v0.13 compatibility on Windows
+- Fixed inconsistent queue capacity across backends when capacity was defined as 0
+  (trio = 0, others = infinite)
+- Fixed socket creation failure crashing ``connect_tcp()``
+
 **1.2.0**
 
 - Added the possibility to parametrize regular pytest test functions against the selected list of
