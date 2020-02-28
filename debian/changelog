@@ -1,3 +1,9 @@
+anyio (1.2.3-1) unstable; urgency=medium
+
+  * Merge 1.2.3
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Thu, 09 Jan 2020 17:17:10 +0100
+
 anyio (1.2.0-1) unstable; urgency=medium
 
   * Merge 1.2.0

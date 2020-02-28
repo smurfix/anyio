@@ -325,7 +325,13 @@ async def connect_tcp(
 
     async def try_connect(af: int, addr: str, event: Event):
         nonlocal stream
-        raw_socket = socket.socket(af, socket.SOCK_STREAM)
+        try:
+            raw_socket = socket.socket(af, socket.SOCK_STREAM)
+        except OSError as exc:
+            oserrors.append(exc)
+            await event.set()
+            return
+
         sock = asynclib.Socket(raw_socket)
         try:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -341,9 +347,12 @@ async def connect_tcp(
             await sock.close()
             raise
         else:
-            assert stream is None
-            stream = _networking.SocketStream(sock, ssl_context, target_host,
-                                              tls_standard_compatible)
+            if stream is None:
+                stream = _networking.SocketStream(sock, ssl_context, target_host,
+                                                  tls_standard_compatible)
+                await tg.cancel_scope.cancel()
+            else:
+                raw_socket.close()
         finally:
             await event.set()
 
@@ -386,10 +395,6 @@ async def connect_tcp(
             await tg.spawn(try_connect, af, addr, event)
             async with move_on_after(happy_eyeballs_delay):
                 await event.wait()
-
-            if stream is not None:
-                await tg.cancel_scope.cancel()
-                break
 
     if stream is None:
         cause = oserrors[0] if len(oserrors) == 1 else asynclib.ExceptionGroup(oserrors)
@@ -630,7 +635,7 @@ def create_queue(capacity: int) -> Queue:
     """
     Create an asynchronous queue.
 
-    :param capacity: maximum number of items the queue will be able to store
+    :param capacity: maximum number of items the queue will be able to store (0 = infinite)
     :return: a queue object
 
     """

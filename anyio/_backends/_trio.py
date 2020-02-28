@@ -1,3 +1,4 @@
+import math
 from typing import Callable, Optional, List, Union
 
 import trio.hazmat
@@ -51,7 +52,7 @@ class CancelScope:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         return self.__original.__exit__(exc_type, exc_val, exc_tb)
 
-    async def cancel(self):
+    async def cancel(self) -> None:
         self.__original.cancel()
 
     @property
@@ -177,7 +178,8 @@ class Socket(BaseSocket):
         return wait_socket_writable(self._raw_socket)
 
     async def _notify_close(self):
-        notify_closing(self._raw_socket)
+        if self._raw_socket.fileno() >= 0:
+            notify_closing(self._raw_socket)
 
     def _check_cancelled(self):
         return trio.hazmat.checkpoint_if_cancelled()
@@ -246,7 +248,8 @@ Semaphore = trio.Semaphore
 
 class Queue:
     def __init__(self, max_items: int) -> None:
-        self._send_channel, self._receive_channel = trio.open_memory_channel(max_items)
+        max_buffer_size = max_items if max_items > 0 else math.inf
+        self._send_channel, self._receive_channel = trio.open_memory_channel(max_buffer_size)
 
     def empty(self):
         return self._receive_channel.statistics().current_buffer_used == 0
