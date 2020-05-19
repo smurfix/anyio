@@ -1,3 +1,4 @@
+import platform
 import socket
 import ssl
 import sys
@@ -234,6 +235,8 @@ class TestTCPStream:
                 client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 80000)
                 assert client.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF) in (80000, 160000)
 
+    @pytest.mark.xfail(condition=platform.system() == 'Darwin',
+                       reason='Occasionally fails on macOS')
     @pytest.mark.anyio
     async def test_concurrent_write(self, localhost):
         async def send_data():
@@ -280,7 +283,7 @@ class TestTCPStream:
     @pytest.mark.anyio
     async def test_happy_eyeballs(self, interface, expected_addr, fake_localhost_dns):
         async def handle_client(stream):
-            addr, port, *rest = stream._socket._raw_socket.getpeername()
+            addr, port, *rest = stream.peer_address
             await stream.send_all(addr.encode() + b'\n')
 
         async def server():
@@ -292,6 +295,7 @@ class TestTCPStream:
                 await tg.spawn(server)
                 async with await connect_tcp('localhost', stream_server.port) as client:
                     assert await client.receive_until(b'\n', 100) == expected_addr
+                    assert client.address[0] == expected_addr.decode()
 
                 await stream_server.close()
 
@@ -317,6 +321,19 @@ class TestTCPStream:
         if exception_class is ExceptionGroup:
             for exc in exc.value.__cause__.exceptions:
                 assert isinstance(exc, ConnectionRefusedError)
+
+    @pytest.mark.anyio
+    async def test_socket_creation_failure(self, monkeypatch):
+        def fake_create_socket(*args):
+            raise OSError('Bogus error')
+
+        monkeypatch.setattr(socket, 'socket', fake_create_socket)
+        with pytest.raises(OSError) as exc:
+            await connect_tcp('127.0.0.1', 1111)
+
+        exc.match('All connection attempts failed')
+        assert isinstance(exc.value.__cause__, OSError)
+        assert str(exc.value.__cause__) == 'Bogus error'
 
 
 class TestUNIXStream:
@@ -458,7 +475,7 @@ class TestTLSStream:
 
     @pytest.mark.parametrize('server_compatible, client_compatible, exc_class', [
         (True, True, IncompleteRead),
-        (True, False, ssl.SSLEOFError),
+        (True, False, (ssl.SSLEOFError, ConnectionResetError)),
         (False, True, IncompleteRead),
         (False, False, IncompleteRead)
     ], ids=['both_standard', 'server_standard', 'client_standard', 'neither_standard'])
@@ -468,6 +485,7 @@ class TestTLSStream:
         async def server():
             async with await stream_server.accept() as stream:
                 chunks.append(await stream.receive_exactly(2))
+                await stream.send_all(b'OK\n')
                 with pytest.raises(exc_class):
                     await stream.receive_exactly(2)
 
@@ -481,6 +499,7 @@ class TestTLSStream:
                         'localhost', stream_server.port, ssl_context=client_context,
                         autostart_tls=True, tls_standard_compatible=client_compatible) as client:
                     await client.send_all(b'bl')
+                    assert await client.receive_exactly(3) == b'OK\n'
 
         assert chunks == [b'bl']
 

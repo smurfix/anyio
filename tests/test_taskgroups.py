@@ -61,6 +61,9 @@ def test_run_natively(module, as_coro_obj):
     else:
         module.run(testfunc)
 
+    if module is asyncio:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
 
 @pytest.mark.anyio
 async def test_spawn_while_running():
@@ -473,12 +476,78 @@ async def test_nested_shield():
                         await sleep(2)
 
 
-def test_task_group_in_generator(anyio_backend):
+def test_task_group_in_generator(anyio_backend_name, anyio_backend_options):
     @async_generator
     async def task_group_generator():
         async with create_task_group():
             await yield_()
 
     gen = task_group_generator()
-    anyio.run(gen.__anext__, backend=anyio_backend)
-    pytest.raises(StopAsyncIteration, anyio.run, gen.__anext__, backend=anyio_backend)
+    anyio.run(gen.__anext__, backend=anyio_backend_name, backend_options=anyio_backend_options)
+    pytest.raises(StopAsyncIteration, anyio.run, gen.__anext__, backend=anyio_backend_name,
+                  backend_options=anyio_backend_options)
+
+
+@pytest.mark.anyio
+async def test_exception_group_filtering():
+    """Test that CancelledErrors are filtered out of nested exception groups."""
+
+    async def fail(name):
+        try:
+            await anyio.sleep(.1)
+        finally:
+            raise Exception('%s task failed' % name)
+
+    async def fn():
+        async with anyio.create_task_group() as task_group:
+            await task_group.spawn(fail, 'parent')
+            async with anyio.create_task_group() as task_group2:
+                await task_group2.spawn(fail, 'child')
+                await anyio.sleep(1)
+
+    with pytest.raises(anyio.exceptions.ExceptionGroup) as exc:
+        await fn()
+
+    assert len(exc.value.exceptions) == 2
+    assert str(exc.value.exceptions[0]) == 'parent task failed'
+    assert str(exc.value.exceptions[1]) == 'child task failed'
+
+
+@pytest.mark.anyio
+async def test_cancel_propagation_with_inner_spawn():
+    async def g():
+        async with anyio.create_task_group() as g:
+            await g.spawn(anyio.sleep, 10)
+            await anyio.sleep(5)
+
+        assert False
+
+    async with anyio.create_task_group() as group:
+        await group.spawn(g)
+        await anyio.sleep(0.1)
+        await group.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_escaping_cancelled_error_from_cancelled_task():
+    """Regression test for issue #88. No CancelledError should escape the outer scope."""
+    async with open_cancel_scope() as scope:
+        async with move_on_after(0.1):
+            await sleep(1)
+
+        await scope.cancel()
+
+
+@pytest.mark.filterwarnings('ignore:"@coroutine" decorator is deprecated:DeprecationWarning')
+def test_cancel_generator_based_task():
+    from asyncio import coroutine
+
+    async def native_coro_part():
+        async with open_cancel_scope() as scope:
+            await scope.cancel()
+
+    @coroutine
+    def generator_part():
+        yield from native_coro_part()
+
+    anyio.run(generator_part, backend='asyncio')

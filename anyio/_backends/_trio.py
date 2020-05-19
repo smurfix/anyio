@@ -1,4 +1,6 @@
-from typing import Callable, Optional, List, Union
+import math
+from types import TracebackType
+from typing import Callable, Optional, List, Type, Union
 
 import trio.hazmat
 import trio.from_thread
@@ -48,10 +50,12 @@ class CancelScope:
         self.__original.__enter__()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(self, exc_type: Optional[Type[BaseException]],
+                        exc_val: Optional[BaseException],
+                        exc_tb: Optional[TracebackType]) -> Optional[bool]:
         return self.__original.__exit__(exc_type, exc_val, exc_tb)
 
-    async def cancel(self):
+    async def cancel(self) -> None:
         self.__original.cancel()
 
     @property
@@ -119,7 +123,9 @@ class TaskGroup:
         self.cancel_scope = CancelScope(self._nursery.cancel_scope)
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(self, exc_type: Optional[Type[BaseException]],
+                        exc_val: Optional[BaseException],
+                        exc_tb: Optional[TracebackType]) -> Optional[bool]:
         try:
             return await self._nursery_manager.__aexit__(exc_type, exc_val, exc_tb)
         except trio.MultiError as exc:
@@ -177,7 +183,8 @@ class Socket(BaseSocket):
         return wait_socket_writable(self._raw_socket)
 
     async def _notify_close(self):
-        notify_closing(self._raw_socket)
+        if self._raw_socket.fileno() >= 0:
+            notify_closing(self._raw_socket)
 
     def _check_cancelled(self):
         return trio.hazmat.checkpoint_if_cancelled()
@@ -246,7 +253,8 @@ Semaphore = trio.Semaphore
 
 class Queue:
     def __init__(self, max_items: int) -> None:
-        self._send_channel, self._receive_channel = trio.open_memory_channel(max_items)
+        max_buffer_size = max_items if max_items > 0 else math.inf
+        self._send_channel, self._receive_channel = trio.open_memory_channel(max_buffer_size)
 
     def empty(self):
         return self._receive_channel.statistics().current_buffer_used == 0
@@ -282,7 +290,9 @@ class CapacityLimiter(abc.CapacityLimiter):
         await self._limiter.__aenter__()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(self, exc_type: Optional[Type[BaseException]],
+                        exc_val: Optional[BaseException],
+                        exc_tb: Optional[TracebackType]) -> None:
         await self._limiter.__aexit__(exc_type, exc_val, exc_tb)
 
     @property

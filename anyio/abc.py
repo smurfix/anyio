@@ -16,7 +16,9 @@ class Lock(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(self, exc_type: Optional[Type[BaseException]],
+                        exc_val: Optional[BaseException],
+                        exc_tb: Optional[TracebackType]) -> Optional[bool]:
         pass
 
     @abstractmethod
@@ -30,7 +32,9 @@ class Condition(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(self, exc_type: Optional[Type[BaseException]],
+                        exc_val: Optional[BaseException],
+                        exc_tb: Optional[TracebackType]) -> Optional[bool]:
         pass
 
     @abstractmethod
@@ -78,7 +82,9 @@ class Semaphore(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(self, exc_type: Optional[Type[BaseException]],
+                        exc_val: Optional[BaseException],
+                        exc_tb: Optional[TracebackType]) -> Optional[bool]:
         pass
 
     @property
@@ -136,7 +142,9 @@ class CapacityLimiter(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(self, exc_type: Optional[Type[BaseException]],
+                        exc_val: Optional[BaseException],
+                        exc_tb: Optional[TracebackType]) -> Optional[bool]:
         pass
 
     @property
@@ -240,14 +248,15 @@ class TaskGroup(metaclass=ABCMeta):
         """Enter the task group context and allow starting new tasks."""
 
     @abstractmethod
-    async def __aexit__(self, exc_type: Type[BaseException], exc_val: BaseException,
-                        exc_tb: TracebackType) -> Optional[bool]:
+    async def __aexit__(self, exc_type: Optional[Type[BaseException]],
+                        exc_val: Optional[BaseException],
+                        exc_tb: Optional[TracebackType]) -> Optional[bool]:
         """Exit the task group context waiting for all tasks to finish."""
 
 
 class CancelScope(metaclass=ABCMeta):
     @abstractmethod
-    async def cancel(self):
+    async def cancel(self) -> None:
         """Cancel this scope immediately."""
 
     @property
@@ -278,7 +287,9 @@ class CancelScope(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(self, exc_type: Optional[Type[BaseException]],
+                        exc_val: Optional[BaseException],
+                        exc_tb: Optional[TracebackType]) -> Optional[bool]:
         pass
 
 
@@ -320,7 +331,9 @@ class AsyncFile(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(self, exc_type: Optional[Type[BaseException]],
+                        exc_val: Optional[BaseException],
+                        exc_tb: Optional[TracebackType]) -> Optional[bool]:
         pass
 
     @abstractmethod
@@ -384,7 +397,9 @@ class Stream(metaclass=ABCMeta):
     async def __aenter__(self):
         return self
 
-    async def __aexit__(self, *exc_info):
+    async def __aexit__(self, exc_type: Optional[Type[BaseException]],
+                        exc_val: Optional[BaseException],
+                        exc_tb: Optional[TracebackType]) -> None:
         await self.close()
 
     @abstractmethod
@@ -496,6 +511,30 @@ class SocketStream(Stream):
         This calls :meth:`~socket.socket.setsockopt` on the underlying socket.
         """
 
+    @property
+    def address(self) -> Union[Tuple[str, int], Tuple[str, int, int, int], str]:
+        """
+        Return the bound address of the underlying local socket.
+
+        For IPv4 TCP streams, this is a tuple of (IP address, port).
+        For IPv6 TCP streams, this is a tuple of (IP address, port, flowinfo, scopeid).
+        For UNIX socket streams, this is the path to the socket.
+
+        """
+        raise NotImplementedError
+
+    @property
+    def peer_address(self) -> Union[Tuple[str, int], Tuple[str, int, int, int], str]:
+        """
+        Return the address this socket is connected to.
+
+        For IPv4 TCP streams, this is a tuple of (IP address, port).
+        For IPv6 TCP streams, this is a tuple of (IP address, port, flowinfo, scopeid).
+        For UNIX socket streams, this is the path to the socket.
+
+        """
+        raise NotImplementedError
+
     @abstractmethod
     async def start_tls(self, context: Optional[SSLContext] = None) -> None:
         """
@@ -603,7 +642,9 @@ class SocketStreamServer(metaclass=ABCMeta):
     async def __aenter__(self):
         return self
 
-    async def __aexit__(self, *exc_info):
+    async def __aexit__(self, exc_type: Optional[Type[BaseException]],
+                        exc_val: Optional[BaseException],
+                        exc_tb: Optional[TracebackType]) -> None:
         await self.close()
 
     @abstractmethod
@@ -662,7 +703,9 @@ class UDPSocket(metaclass=ABCMeta):
     async def __aenter__(self):
         return self
 
-    async def __aexit__(self, *exc_info):
+    async def __aexit__(self, exc_type: Optional[Type[BaseException]],
+                        exc_val: Optional[BaseException],
+                        exc_tb: Optional[TracebackType]) -> None:
         await self.close()
 
     @abstractmethod
