@@ -3,6 +3,13 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
+**1.3.0**
+
+- Fixed compatibility with Curio 1.0
+- Made it possible to assert fine grained control over which AnyIO backends and backend options are
+  being used with each test
+- Added the ``address`` and ``peer_address`` properties to the ``SocketStream`` interface
+
 **1.2.3**
 
 - Repackaged release (v1.2.2 contained extra files from an experimental
