@@ -1,6 +1,5 @@
 import asyncio
 import concurrent.futures
-import inspect
 import math
 import os
 import socket
@@ -26,7 +25,8 @@ try:
 except ImportError:
     _T = TypeVar('_T')
 
-    def create_task(coro: Union[Generator[Any, None, _T], Awaitable[_T]]) -> asyncio.Task:
+    def create_task(coro: Union[Generator[Any, None, _T], Awaitable[_T]], *,
+                    name: Optional[str] = None) -> asyncio.Task:
         return get_running_loop().create_task(coro)
 
     def get_running_loop() -> asyncio.AbstractEventLoop:
@@ -52,7 +52,7 @@ except ImportError:
         return asyncio.Task.current_task(loop)
 
 # Check whether there is native support for task names in asyncio (3.8+)
-_native_task_names = 'name' in inspect.signature(create_task).parameters
+_native_task_names = hasattr(asyncio.Task, 'get_name')
 
 
 #
@@ -76,7 +76,9 @@ def run(func: Callable[..., T_Retval], *args, debug: bool = False, use_uvloop: b
         except ImportError:
             pass
         else:
-            policy = uvloop.EventLoopPolicy()
+            if (not hasattr(asyncio.AbstractEventLoop, 'shutdown_default_executor')
+                    or hasattr(uvloop.loop.Loop, 'shutdown_default_executor')):
+                policy = uvloop.EventLoopPolicy()
 
     # Must be explicitly set on Python 3.8 for now or wait_socket_(readable|writable) won't work
     if policy is None and sys.platform == 'win32' and sys.version_info >= (3, 8):
@@ -254,8 +256,11 @@ abc.CancelScope.register(CancelScope)
 
 
 def check_cancelled():
+    task = current_task()
+    if task is None:
+        return
     try:
-        cancel_scope = _task_states[current_task()].cancel_scope
+        cancel_scope = _task_states[task].cancel_scope
     except KeyError:
         return
 
