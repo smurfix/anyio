@@ -501,7 +501,8 @@ async def create_unix_server(
 
 async def create_udp_socket(
     *, interface: Optional[IPAddressType] = None, port: Optional[int] = None,
-    target_host: Optional[IPAddressType] = None, target_port: Optional[int] = None
+    target_host: Optional[IPAddressType] = None, target_port: Optional[int] = None,
+    address_family: Optional[int] = socket.AF_UNSPEC
 ) -> UDPSocket:
     """
     Create a UDP socket.
@@ -519,7 +520,7 @@ async def create_udp_socket(
     if interface:
         interface, family, _v6only = await _networking.get_bind_address(interface)
     else:
-        interface, family = None, 0
+        interface, family = None, address_family
 
     if target_host:
         res = await run_in_thread(socket.getaddrinfo, target_host, target_port, family)
@@ -532,6 +533,11 @@ async def create_udp_socket(
     raw_socket = socket.socket(family=family, type=socket.SOCK_DGRAM)
     sock = _get_asynclib().Socket(raw_socket)
     try:
+        if sys.platform == 'win32':
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
         if interface is not None or port is not None:
             await sock.bind((interface or '', port or 0))
 
