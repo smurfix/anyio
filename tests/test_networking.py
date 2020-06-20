@@ -2,14 +2,16 @@ import platform
 import socket
 import ssl
 import sys
+import time
 import warnings
 from pathlib import Path
+from threading import Thread
 
 import pytest
 
 from anyio import (
     create_task_group, connect_tcp, create_udp_socket, connect_unix, create_unix_server,
-    create_tcp_server, wait_all_tasks_blocked)
+    create_tcp_server, wait_all_tasks_blocked, move_on_after)
 from anyio.exceptions import (
     IncompleteRead, DelimiterNotFound, ClosedResourceError, ResourceBusyError, ExceptionGroup)
 
@@ -335,6 +337,26 @@ class TestTCPStream:
         assert isinstance(exc.value.__cause__, OSError)
         assert str(exc.value.__cause__) == 'Bogus error'
 
+    @pytest.mark.anyio
+    async def test_receive_timeout(self):
+        def server():
+            conn, _ = sock.accept()
+            conn.close()
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(('127.0.0.1', 0))
+        sock.listen()
+        addr = sock.getsockname()
+        thread = Thread(target=server, daemon=True)
+        thread.start()
+        stream = await connect_tcp(*addr)
+        start_time = time.monotonic()
+        async with move_on_after(0.1):
+            while time.monotonic() - start_time < 0.3:
+                await stream.receive_some(1)
+
+            pytest.fail('The timeout was not respected')
+
 
 class TestUNIXStream:
     @pytest.mark.skipif(sys.platform == 'win32',
@@ -543,9 +565,13 @@ class TestUDPSocket:
 
     @pytest.mark.anyio
     async def test_udp_close_socket_from_other_task(self, localhost):
+        async def close_when_blocked():
+            await wait_all_tasks_blocked()
+            await udp.close()
+
         async with create_task_group() as tg:
             async with await create_udp_socket(interface=localhost) as udp:
-                await tg.spawn(udp.close)
+                await tg.spawn(close_when_blocked)
                 with pytest.raises(ClosedResourceError):
                     await udp.receive(100)
 
