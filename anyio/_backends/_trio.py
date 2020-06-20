@@ -289,10 +289,16 @@ class Queue:
         return self._receive_channel.statistics().current_buffer_used
 
     async def put(self, item) -> None:
-        await self._send_channel.send(item)
+        try:
+            self._send_channel.send_nowait(item)
+        except trio.WouldBlock:
+            await self._send_channel.send(item)
 
     async def get(self):
-        return await self._receive_channel.receive()
+        try:
+            return self._receive_channel.receive_nowait()
+        except trio.WouldBlock:
+            return await self._receive_channel.receive()
 
     def __aiter__(self):
         return self

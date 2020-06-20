@@ -3,7 +3,7 @@ import pytest
 from anyio import (
     create_lock, create_task_group, create_queue, create_event, create_semaphore, create_condition,
     open_cancel_scope, wait_all_tasks_blocked, create_capacity_limiter,
-    current_default_thread_limiter, CapacityLimiter)
+    current_default_thread_limiter, CapacityLimiter, fail_after)
 
 
 class TestLock:
@@ -214,6 +214,34 @@ class TestQueue:
             await wait_all_tasks_blocked()
             await local_scope.cancel()
             await queue.get()
+
+        assert queue.empty()
+
+    @pytest.mark.anyio
+    async def test_put_immediate(self):
+        async def task():
+            async with fail_after(0):
+                await queue.put(None)
+
+        queue = create_queue(1)
+        async with create_task_group() as tg:
+            await tg.spawn(task)
+            await wait_all_tasks_blocked()
+            await queue.get()
+
+        assert queue.empty()
+
+    @pytest.mark.anyio
+    async def test_get_immediate(self):
+        async def task():
+            await queue.put(None)
+
+        queue = create_queue(1)
+        async with create_task_group() as tg:
+            await tg.spawn(task)
+            await wait_all_tasks_blocked()
+            async with fail_after(0):
+                await queue.get()
 
         assert queue.empty()
 
