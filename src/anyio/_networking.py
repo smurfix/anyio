@@ -268,11 +268,11 @@ class SocketStream(abc.SocketStream):
                 return found
 
             # Check if the buffer is already at or over the limit
-            if len(self._buffer) >= max_size:
-                raise DelimiterNotFound(max_size)
+            if len(self._buffer) >= max_bytes:
+                raise DelimiterNotFound(max_bytes)
 
             # Read more data into the buffer from the socket
-            read_size = max_size - len(self._buffer)
+            read_size = max_bytes - len(self._buffer)
             data = await self._socket.recv(read_size)
             if not data:
                 raise IncompleteRead
