@@ -256,7 +256,7 @@ class SocketStream(abc.SocketStream):
         self._buffer = self._buffer[nbytes:]
         return result
 
-    async def receive_until(self, delimiter: bytes, max_size: int) -> bytes:
+    async def receive_until(self, delimiter: bytes, max_bytes: int) -> bytes:
         delimiter_size = len(delimiter)
         offset = 0
         while True:

@@ -29,6 +29,12 @@ else:
     spawn_kwargs = {}
 
 
+def get_callable_name(func: Callable) -> str:
+    module = getattr(func, '__module__', None)
+    qualname = getattr(func, '__qualname__', None)
+    return '.'.join([x for x in (module, qualname) if x])
+
+
 #
 # Event loop
 #
@@ -42,7 +48,9 @@ def run(func: Callable[..., T_Retval], *args, **curio_options) -> T_Retval:
             exception = exc
 
     exception = retval = None
-    curio.run(wrapper, **curio_options)
+    coro = wrapper()
+    coro.__qualname__ = get_callable_name(func)
+    curio.run(coro, **curio_options)
     if exception is not None:
         raise exception
     else:
@@ -70,7 +78,7 @@ CancelledError = curio.TaskCancelled
 
 class CancelScope:
     __slots__ = ('_deadline', '_shield', '_parent_scope', '_cancel_called', '_active',
-                 '_timeout_task', '_tasks', '_host_task', '_timeout_expired')
+                 '_timeout_task', '_previous_timeout', '_tasks', '_host_task', '_timeout_expired')
 
     def __init__(self, deadline: float = math.inf, shield: bool = False):
         self._deadline = deadline
@@ -79,16 +87,12 @@ class CancelScope:
         self._cancel_called = False
         self._active = False
         self._timeout_task = None
+        self._previous_timeout = None
         self._tasks = set()  # type: Set[curio.Task]
         self._host_task = None  # type: Optional[curio.Task]
         self._timeout_expired = False
 
     async def __aenter__(self):
-        async def timeout():
-            await curio.sleep(self._deadline - await curio.clock())
-            self._timeout_expired = True
-            await self.cancel()
-
         if self._active:
             raise RuntimeError(
                 "Each CancelScope may only be used for a single 'async with' block"
@@ -110,7 +114,7 @@ class CancelScope:
                 self._cancel_called = True
                 self._timeout_expired = True
             else:
-                self._timeout_task = await curio.spawn(timeout)
+                self._previous_timeout = await curio.traps._set_timeout(self._deadline)
 
         self._active = True
         return self
@@ -119,8 +123,14 @@ class CancelScope:
                         exc_val: Optional[BaseException],
                         exc_tb: Optional[TracebackType]) -> Optional[bool]:
         self._active = False
-        if self._timeout_task:
-            await self._timeout_task.cancel(blocking=False)
+        if self._previous_timeout:
+            await curio.traps._unset_timeout(self._previous_timeout)
+
+        if exc_type is curio.errors.TaskTimeout:
+            if self._deadline != math.inf and await curio.clock() >= self._deadline:
+                self._cancel_called = True
+                self._timeout_expired = True
+                exc_val = CancelledError().with_traceback(exc_tb)
 
         self._tasks.remove(self._host_task)
         host_task_state = _task_states.get(self._host_task)
@@ -136,7 +146,10 @@ class CancelScope:
                     # This scope was directly cancelled
                     return True
 
-        return None
+        if exc_val is not None and self._timeout_expired:
+            raise exc_val
+        else:
+            return None
 
     async def _cancel(self):
         # Deliver cancellation to directly contained tasks and nested cancel scopes
@@ -219,7 +232,7 @@ async def fail_after(delay: float, shield: bool):
         await yield_(scope)
 
     if scope._timeout_expired:
-        raise TimeoutError
+        raise TimeoutError from None
 
 
 @asynccontextmanager
@@ -348,8 +361,7 @@ class TaskGroup:
 
         task = await curio.spawn(self._run_wrapped_task, func, args, daemon=True, **spawn_kwargs)
         task.parentid = (await curio.current_task()).id
-        if name is not None:
-            task.name = name
+        task.name = name or get_callable_name(func)
 
         # Make the spawned task inherit the task group's cancel scope
         _task_states[task] = TaskState(cancel_scope=self.cancel_scope)
@@ -448,7 +460,7 @@ class Socket(BaseSocket):
         return notify_socket_close(self._raw_socket)
 
     def _check_cancelled(self) -> Coroutine[Any, Any, None]:
-        return check_cancelled()
+        return sleep(0)
 
     def _run_in_thread(self, func: Callable, *args):
         return run_in_thread(func, *args)
@@ -725,7 +737,21 @@ async def wait_all_tasks_blocked() -> None:
     kernel = await curio.traps._get_kernel()
     while True:
         for task in kernel._tasks.values():
-            if task.id != this_task.id and task.coro.cr_await is None:
+            if task.id == this_task.id:
+                continue
+
+            # Consider any task doing sleep(0) as not being blocked
+            awaitable = task.coro.cr_await
+            while inspect.iscoroutine(awaitable) and hasattr(awaitable, 'cr_code'):
+                if (awaitable.cr_code is sleep.__code__
+                        and awaitable.cr_frame.f_locals['delay'] == 0):
+                    awaitable = None
+                elif awaitable.cr_await:
+                    awaitable = awaitable.cr_await
+                else:
+                    break
+
+            if awaitable is None:
                 await curio.sleep(0)
                 break
         else:

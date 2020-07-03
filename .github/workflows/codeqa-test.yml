@@ -3,10 +3,8 @@ name: Python codeqa/test
 on:
   push:
     branches:
-      - "*"
+      - master
   pull_request:
-    branches:
-      - "*"
 
 jobs:
   flake8:
@@ -29,7 +27,7 @@ jobs:
     - name: Install dependencies
       run: pip install mypy
     - name: Check types with Mypy
-      run: mypy anyio
+      run: mypy src
 
   test:
     needs: [flake8, mypy]

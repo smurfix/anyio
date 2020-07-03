@@ -55,6 +55,12 @@ except ImportError:
 _native_task_names = hasattr(asyncio.Task, 'get_name')
 
 
+def get_callable_name(func: Callable) -> str:
+    module = getattr(func, '__module__', None)
+    qualname = getattr(func, '__qualname__', None)
+    return '.'.join([x for x in (module, qualname) if x])
+
+
 #
 # Event loop
 #
@@ -94,7 +100,13 @@ def run(func: Callable[..., T_Retval], *args, debug: bool = False, use_uvloop: b
     exception = retval = None
     loop = asyncio.get_event_loop()
     loop.set_debug(debug)
-    loop.run_until_complete(wrapper())
+    task = loop.create_task(wrapper())
+    task_state = TaskState(None, get_callable_name(func), None)
+    _task_states[task] = task_state
+    if _native_task_names:
+        task.set_name(task_state.name)
+
+    loop.run_until_complete(task)
     if exception is not None:
         raise exception
     else:
@@ -412,6 +424,7 @@ class TaskGroup:
         if not self._active:
             raise RuntimeError('This task group is not active; no new tasks can be spawned.')
 
+        name = name or get_callable_name(func)
         if _native_task_names is None:
             task = create_task(self._run_wrapped_task(func, args), name=name)  # type: ignore
         else:
@@ -577,8 +590,8 @@ class Socket(BaseSocket):
     def _notify_close(self):
         return notify_socket_close(self._raw_socket)
 
-    async def _check_cancelled(self) -> None:
-        check_cancelled()
+    def _check_cancelled(self):
+        return sleep(0)
 
     def _run_in_thread(self, func: Callable, *args):
         return run_in_thread(func, *args)
@@ -878,6 +891,16 @@ async def wait_all_tasks_blocked() -> None:
                     awaitable = task._coro.cr_await  # type: ignore
                 except AttributeError:
                     awaitable = task._coro.gi_yieldfrom  # type: ignore
+
+                # Consider any task doing sleep(0) as not being blocked
+                while asyncio.iscoroutine(awaitable) and hasattr(awaitable, 'cr_code'):
+                    if (awaitable.cr_code is sleep.__code__
+                            and awaitable.cr_frame.f_locals['delay'] == 0):
+                        awaitable = None
+                    elif awaitable.cr_await:
+                        awaitable = awaitable.cr_await
+                    else:
+                        break
 
                 if awaitable is None:
                     await sleep(0)
