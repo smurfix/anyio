@@ -555,15 +555,6 @@ class TestUDPSocket:
             assert addr[:2] == (localhost, socket.port)
 
     @pytest.mark.anyio
-    async def test_udp_rebind(self, localhost):
-        async with await create_udp_socket(address_family=socket.AF_INET, port=0,
-                                           target_host="8.8.8.8", target_port=9999) as udp:
-            port = udp.address[1]
-            assert port != 0
-            async with await create_udp_socket(address_family=socket.AF_INET, port=port) as udp2:
-                assert port == udp2.address[1]
-
-    @pytest.mark.anyio
     async def test_udp_close_socket_from_other_task(self, localhost):
         async def close_when_blocked():
             await wait_all_tasks_blocked()
@@ -597,6 +588,16 @@ class TestUDPSocket:
         async with await create_udp_socket(interface=localhost) as udp:
             udp.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 80000)
             assert udp.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF) in (80000, 160000)
+
+    @pytest.mark.anyio
+    async def test_reuse_address(self):
+        async with await create_udp_socket(family=socket.AF_INET, port=0, target_host='8.8.8.8',
+                                           target_port=9999, reuse_address=True) as udp:
+            port = udp.address[1]
+            assert port != 0
+            async with await create_udp_socket(family=socket.AF_INET, port=port,
+                                               reuse_address=True) as udp2:
+                assert port == udp2.address[1]
 
 
 @pytest.mark.anyio

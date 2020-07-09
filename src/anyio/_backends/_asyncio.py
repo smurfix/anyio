@@ -273,11 +273,8 @@ abc.CancelScope.register(CancelScope)
 
 
 def check_cancelled():
-    task = current_task()
-    if task is None:
-        return
     try:
-        cancel_scope = _task_states[task].cancel_scope
+        cancel_scope = _task_states[current_task()].cancel_scope
     except KeyError:
         return
 
