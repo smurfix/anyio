@@ -11,7 +11,7 @@ import pytest
 
 from anyio import (
     create_task_group, connect_tcp, create_udp_socket, connect_unix, create_unix_server,
-    create_tcp_server, wait_all_tasks_blocked, move_on_after)
+    create_tcp_server, wait_all_tasks_blocked, move_on_after, getaddrinfo, getnameinfo)
 from anyio.exceptions import (
     IncompleteRead, DelimiterNotFound, ClosedResourceError, ResourceBusyError, ExceptionGroup)
 
@@ -555,15 +555,6 @@ class TestUDPSocket:
             assert addr[:2] == (localhost, socket.port)
 
     @pytest.mark.anyio
-    async def test_udp_rebind(self, localhost):
-        async with await create_udp_socket(address_family=socket.AF_INET, port=0,
-                                           target_host="8.8.8.8", target_port=9999) as udp:
-            port = udp.address[1]
-            assert port != 0
-            async with await create_udp_socket(address_family=socket.AF_INET, port=port) as udp2:
-                assert port == udp2.address[1]
-
-    @pytest.mark.anyio
     async def test_udp_close_socket_from_other_task(self, localhost):
         async def close_when_blocked():
             await wait_all_tasks_blocked()
@@ -597,3 +588,39 @@ class TestUDPSocket:
         async with await create_udp_socket(interface=localhost) as udp:
             udp.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 80000)
             assert udp.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF) in (80000, 160000)
+
+    @pytest.mark.anyio
+    async def test_reuse_address(self):
+        async with await create_udp_socket(family=socket.AF_INET, port=0, target_host='8.8.8.8',
+                                           target_port=9999, reuse_address=True) as udp:
+            port = udp.address[1]
+            assert port != 0
+            async with await create_udp_socket(family=socket.AF_INET, port=port,
+                                               reuse_address=True) as udp2:
+                assert port == udp2.address[1]
+
+
+@pytest.mark.anyio
+async def test_getaddrinfo():
+    # IDNA 2003 gets this wrong
+    correct = await getaddrinfo('faß.de', 0)
+    wrong = await getaddrinfo('fass.de', 0)
+    assert correct != wrong
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('sock_type', [socket.SOCK_STREAM, socket.SocketKind.SOCK_STREAM])
+async def test_getaddrinfo_ipv6addr(sock_type):
+    # IDNA trips up over raw IPv6 addresses
+    proto = 0 if platform.system() == 'Windows' else 6
+    assert await getaddrinfo('::1', 0, type=sock_type) == [
+        (socket.AddressFamily.AF_INET6, socket.SocketKind.SOCK_STREAM, proto, '',
+         ('::1', 0, 0, 0))
+    ]
+
+
+@pytest.mark.anyio
+async def test_getnameinfo():
+    expected_result = socket.getnameinfo(('127.0.0.1', 6666), 0)
+    result = await getnameinfo(('127.0.0.1', 6666))
+    assert result == expected_result

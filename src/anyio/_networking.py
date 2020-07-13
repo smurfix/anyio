@@ -455,7 +455,11 @@ class UDPSocket(abc.UDPSocket):
     async def send(self, data: bytes, address: Optional[IPAddressType] = None,
                    port: Optional[int] = None) -> None:
         if address is not None and port is not None:
-            await self._socket.sendto(data, (str(address), port))
+            from . import getaddrinfo
+
+            gai_res = await getaddrinfo(str(address), port)
+            sock_addr = gai_res[0][-1]
+            await self._socket.sendto(data, sock_addr)
         else:
             await self._socket.send(data)
 
@@ -465,11 +469,11 @@ async def get_bind_address(interface: Optional[IPAddressType]) -> Tuple[str, int
         try:
             if_addr = ip_address(interface)
         except ValueError:
-            from . import run_in_thread
+            from . import getaddrinfo
 
             warnings.warn('Passing a host name as the interface address has been deprecated. '
                           'Use an IP address instead.', category=DeprecationWarning)
-            res = await run_in_thread(socket.getaddrinfo, interface, 0)
+            res = await getaddrinfo(str(interface), 0)
             return res[0][-1][0], res[0][0], False
 
         family = socket.AF_INET6 if isinstance(if_addr, IPv6Address) else socket.AF_INET
