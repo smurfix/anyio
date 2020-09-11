@@ -1,9 +1,11 @@
 import asyncio
-import sys
+import ssl
 
 import pytest
+import trustme
 
 uvloop_marks = []
+uvloop_policy = None
 try:
     import uvloop
 except ImportError:
@@ -13,18 +15,38 @@ else:
             and not hasattr(uvloop.loop.Loop, 'shutdown_default_executor')):
         uvloop_marks.append(
             pytest.mark.skip(reason='uvloop is missing shutdown_default_executor()'))
+    else:
+        uvloop_policy = uvloop.EventLoopPolicy()
 
-
-def pytest_ignore_collect(path, config):
-    return path.basename.endswith('_py36.py') and sys.version_info < (3, 6)
+pytest_plugins = ['pytester']
 
 
 @pytest.fixture(params=[
-    pytest.param(('asyncio', {'use_uvloop': False}), id='asyncio'),
-    pytest.param(('asyncio', {'use_uvloop': True}), id='asyncio+uvloop', marks=uvloop_marks),
+    pytest.param(('asyncio', {'debug': True, 'policy': asyncio.DefaultEventLoopPolicy()}),
+                 id='asyncio'),
+    pytest.param(('asyncio', {'debug': True, 'policy': uvloop_policy}), marks=uvloop_marks,
+                 id='asyncio+uvloop'),
     pytest.param('curio'),
-    pytest.param('trio', marks=[pytest.mark.skipif(sys.version_info < (3, 6),
-                                                   reason='trio only supports py3.6+')])
-], autouse=True)
+    pytest.param('trio')
+])
 def anyio_backend(request):
     return request.param
+
+
+@pytest.fixture(scope='session')
+def ca():
+    return trustme.CA()
+
+
+@pytest.fixture(scope='session')
+def server_context(ca):
+    server_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    ca.issue_cert('localhost').configure_cert(server_context)
+    return server_context
+
+
+@pytest.fixture(scope='session')
+def client_context(ca):
+    client_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+    ca.configure_trust(client_context)
+    return client_context

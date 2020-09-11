@@ -1,34 +1,43 @@
 import inspect
 import math
 import socket
+import sys
 from collections import OrderedDict, defaultdict
 from concurrent.futures import Future
-from functools import partial
+from dataclasses import dataclass
 from signal import signal
 from socket import AddressFamily, SocketKind
 from threading import Thread
 from types import TracebackType
 from typing import (
-    Callable, Set, Optional, Coroutine, Any, cast, Dict, List, Sequence, DefaultDict, Type,
-    Awaitable, Union)
+    Any, Awaitable, Callable, Coroutine, DefaultDict, Dict, Generic, List, NoReturn, Optional,
+    Sequence, Set, Tuple, Type, TypeVar, Union, cast)
 from weakref import WeakKeyDictionary
 
 import curio.io
 import curio.meta
 import curio.socket
 import curio.ssl
+import curio.subprocess
 import curio.traps
-from async_generator import async_generator, asynccontextmanager, yield_
 
-from .. import abc, T_Retval, claim_worker_thread, TaskInfo, _local, GetAddrInfoReturnType
-from ..exceptions import (
-    ExceptionGroup as BaseExceptionGroup, ClosedResourceError, ResourceBusyError, WouldBlock)
-from .._networking import BaseSocket
+from .. import TaskInfo, abc
+from .._core._eventloop import claim_worker_thread, threadlocals
+from .._core._exceptions import (
+    BrokenResourceError, BusyResourceError, ClosedResourceError, EndOfStream)
+from .._core._exceptions import ExceptionGroup as BaseExceptionGroup
+from .._core._exceptions import WouldBlock
+from .._core._sockets import GetAddrInfoReturnType, convert_ipv6_sockaddr
+from .._core._synchronization import ResourceGuard
+from ..abc.sockets import IPSockAddrType, UDPPacketType
 
-if 'report_crash' in inspect.signature(curio.spawn).parameters:
-    spawn_kwargs = {'report_crash': False}
+if sys.version_info >= (3, 7):
+    from contextlib import asynccontextmanager
 else:
-    spawn_kwargs = {}
+    from async_generator import asynccontextmanager
+
+T_Retval = TypeVar('T_Retval')
+T_SockAddr = TypeVar('T_SockAddr', str, IPSockAddrType)
 
 
 def get_callable_name(func: Callable) -> str:
@@ -63,11 +72,8 @@ def run(func: Callable[..., T_Retval], *args, **curio_options) -> T_Retval:
 # Miscellaneous functions
 #
 
-finalize = curio.meta.finalize
-
-
 async def sleep(delay: float):
-    await check_cancelled()
+    await checkpoint()
     await curio.sleep(delay)
 
 
@@ -78,23 +84,27 @@ async def sleep(delay: float):
 CancelledError = curio.TaskCancelled
 
 
-class CancelScope:
+class CancelScope(abc.CancelScope):
     __slots__ = ('_deadline', '_shield', '_parent_scope', '_cancel_called', '_active',
-                 '_timeout_task', '_previous_timeout', '_tasks', '_host_task', '_timeout_expired')
+                 '_timeout_task', '_tasks', '_host_task', '_timeout_expired')
 
     def __init__(self, deadline: float = math.inf, shield: bool = False):
         self._deadline = deadline
         self._shield = shield
-        self._parent_scope = None
+        self._parent_scope: Optional[CancelScope] = None
         self._cancel_called = False
         self._active = False
-        self._timeout_task = None
-        self._previous_timeout = None
-        self._tasks = set()  # type: Set[curio.Task]
-        self._host_task = None  # type: Optional[curio.Task]
+        self._timeout_task: Optional[curio.Task] = None
+        self._tasks: Set[curio.Task] = set()
+        self._host_task: Optional[curio.Task] = None
         self._timeout_expired = False
 
     async def __aenter__(self):
+        async def timeout():
+            await curio.sleep(self._deadline - await curio.clock())
+            self._timeout_expired = True
+            await self.cancel()
+
         if self._active:
             raise RuntimeError(
                 "Each CancelScope may only be used for a single 'async with' block"
@@ -116,7 +126,7 @@ class CancelScope:
                 self._cancel_called = True
                 self._timeout_expired = True
             else:
-                self._previous_timeout = await curio.traps._set_timeout(self._deadline)
+                self._timeout_task = await curio.spawn(timeout)
 
         self._active = True
         return self
@@ -125,14 +135,12 @@ class CancelScope:
                         exc_val: Optional[BaseException],
                         exc_tb: Optional[TracebackType]) -> Optional[bool]:
         self._active = False
-        if self._previous_timeout:
-            await curio.traps._unset_timeout(self._previous_timeout)
+        if self._timeout_task:
+            await self._timeout_task.cancel(blocking=False)
 
         if exc_type is curio.errors.TaskTimeout:
             if self._deadline != math.inf and await curio.clock() >= self._deadline:
-                self._cancel_called = True
                 self._timeout_expired = True
-                exc_val = CancelledError().with_traceback(exc_tb)
 
         self._tasks.remove(self._host_task)
         host_task_state = _task_states.get(self._host_task)
@@ -148,10 +156,7 @@ class CancelScope:
                     # This scope was directly cancelled
                     return True
 
-        if exc_val is not None and self._timeout_expired:
-            raise exc_val
-        else:
-            return None
+        return None
 
     async def _cancel(self):
         # Deliver cancellation to directly contained tasks and nested cancel scopes
@@ -162,13 +167,16 @@ class CancelScope:
                 # Only deliver the cancellation if the task is already running (but not this task!)
                 if not task.coro.cr_running and task.coro.cr_await is not None:
                     await task.cancel(blocking=False)
+
+                    # Enable the task to be cancelled again
+                    task.cancelled = False
             elif not cancel_scope._shielded_to(self):
                 await cancel_scope._cancel()
 
     def _shielded_to(self, parent: 'CancelScope') -> bool:
         # Check whether this task or any parent up to (but not including) the "parent" argument is
         # shielded
-        cancel_scope = self  # type: Optional[CancelScope]
+        cancel_scope: Optional[CancelScope] = self
         while cancel_scope is not None and cancel_scope is not parent:
             if cancel_scope._shield:
                 return True
@@ -208,41 +216,38 @@ class CancelScope:
         return self._shield
 
 
-abc.CancelScope.register(CancelScope)
-
-
-async def check_cancelled():
+async def checkpoint():
     try:
         cancel_scope = _task_states[await curio.current_task()].cancel_scope
     except KeyError:
-        return
+        cancel_scope = None
 
     while cancel_scope:
         if cancel_scope.cancel_called:
             raise CancelledError
         elif cancel_scope.shield:
-            return
+            break
         else:
             cancel_scope = cancel_scope._parent_scope
 
+    await curio.sleep(0)
+
 
 @asynccontextmanager
-@async_generator
 async def fail_after(delay: float, shield: bool):
     deadline = await curio.clock() + delay
     async with CancelScope(deadline, shield) as scope:
-        await yield_(scope)
+        yield scope
 
     if scope._timeout_expired:
         raise TimeoutError from None
 
 
 @asynccontextmanager
-@async_generator
 async def move_on_after(delay: float, shield: bool):
     deadline = await curio.clock() + delay
     async with CancelScope(deadline=deadline, shield=shield) as scope:
-        await yield_(scope)
+        yield scope
 
 
 async def current_effective_deadline():
@@ -291,13 +296,13 @@ class ExceptionGroup(BaseExceptionGroup):
         self.exceptions = exceptions
 
 
-class TaskGroup:
+class TaskGroup(abc.TaskGroup):
     __slots__ = 'cancel_scope', '_active', '_exceptions'
 
     def __init__(self) -> None:
-        self.cancel_scope = CancelScope()
+        self.cancel_scope: CancelScope = CancelScope()
         self._active = False
-        self._exceptions = []  # type: List[BaseException]
+        self._exceptions: List[BaseException] = []
 
     async def __aenter__(self):
         await self.cancel_scope.__aenter__()
@@ -315,7 +320,10 @@ class TaskGroup:
 
         while self.cancel_scope._tasks:
             for task in self.cancel_scope._tasks.copy():
-                await task.wait()
+                try:
+                    await task.wait()
+                except curio.TaskCancelled:
+                    await self.cancel_scope.cancel()
 
         self._active = False
         if not self.cancel_scope._parent_cancelled():
@@ -323,16 +331,22 @@ class TaskGroup:
         else:
             exceptions = self._exceptions
 
-        if len(exceptions) > 1:
-            raise ExceptionGroup(exceptions)
-        elif exceptions and exceptions[0] is not exc_val:
-            raise exceptions[0]
+        try:
+            if len(exceptions) > 1:
+                raise ExceptionGroup(exceptions)
+            elif exceptions and exceptions[0] is not exc_val:
+                raise exceptions[0]
+        except BaseException as exc:
+            # Clear the context here, as it can only be done in-flight.
+            # If the context is not cleared, it can result in recursive tracebacks (see #145).
+            exc.__context__ = None
+            raise
 
         return ignore_exception
 
     @staticmethod
     def _filter_cancellation_errors(exceptions: Sequence[BaseException]) -> List[BaseException]:
-        filtered_exceptions = []  # type: List[BaseException]
+        filtered_exceptions: List[BaseException] = []
         for exc in exceptions:
             if isinstance(exc, ExceptionGroup):
                 exc.exceptions = TaskGroup._filter_cancellation_errors(exc.exceptions)
@@ -361,7 +375,7 @@ class TaskGroup:
         if not self._active:
             raise RuntimeError('This task group is not active; no new tasks can be spawned.')
 
-        task = await curio.spawn(self._run_wrapped_task, func, args, daemon=True, **spawn_kwargs)
+        task = await curio.spawn(self._run_wrapped_task, func, args, daemon=True)
         task.parentid = (await curio.current_task()).id
         task.name = name or get_callable_name(func)
 
@@ -370,15 +384,13 @@ class TaskGroup:
         self.cancel_scope._tasks.add(task)
 
 
-abc.TaskGroup.register(TaskGroup)
-
-
 #
 # Threads
 #
 
-async def run_in_thread(func: Callable[..., T_Retval], *args, cancellable: bool = False,
-                        limiter: Optional['CapacityLimiter'] = None) -> T_Retval:
+async def run_sync_in_worker_thread(
+        func: Callable[..., T_Retval], *args, cancellable: bool = False,
+        limiter: Optional['CapacityLimiter'] = None) -> T_Retval:
     async def async_call_helper():
         while True:
             item = await queue.get()
@@ -387,19 +399,22 @@ async def run_in_thread(func: Callable[..., T_Retval], *args, cancellable: bool 
                 await finish_event.set()
                 return
 
-            func_, args_, f = item  # type: Callable, tuple, Future
+            func_: Callable
+            args_: tuple
+            future: Future
+            func_, args_, future = item
             try:
                 retval_ = await func_(*args_)
             except BaseException as exc_:
-                f.set_exception(exc_)
+                future.set_exception(exc_)
             else:
-                f.set_result(retval_)
+                future.set_result(retval_)
 
     def thread_worker():
         nonlocal retval, exception
         try:
             with claim_worker_thread('curio'):
-                _local.queue = queue
+                threadlocals.queue = queue
                 retval = func(*args)
         except BaseException as exc:
             exception = exc
@@ -407,7 +422,7 @@ async def run_in_thread(func: Callable[..., T_Retval], *args, cancellable: bool 
             if not helper_task.cancelled:
                 queue.put(None)
 
-    await check_cancelled()
+    await checkpoint()
     task = await curio.current_task()
     queue = curio.UniversalQueue(maxsize=1)
     finish_event = curio.Event()
@@ -415,7 +430,7 @@ async def run_in_thread(func: Callable[..., T_Retval], *args, cancellable: bool 
     limiter = limiter or _default_thread_limiter
     await limiter.acquire_on_behalf_of(task)
     thread = Thread(target=thread_worker, daemon=True)
-    helper_task = await curio.spawn(async_call_helper, daemon=True, **spawn_kwargs)
+    helper_task = await curio.spawn(async_call_helper, daemon=True)
     thread.start()
     async with CancelScope(shield=not cancellable):
         await finish_event.wait()
@@ -427,45 +442,293 @@ async def run_in_thread(func: Callable[..., T_Retval], *args, cancellable: bool 
 
 
 def run_async_from_thread(func: Callable[..., T_Retval], *args) -> T_Retval:
-    future = Future()  # type: Future[T_Retval]
-    _local.queue.put((func, args, future))
+    future: Future[T_Retval] = Future()
+    threadlocals.queue.put((func, args, future))
     return future.result()
 
 
+class BlockingPortal(abc.BlockingPortal):
+    __slots__ = '_queue'
+
+    def __init__(self):
+        super().__init__()
+        self._queue = curio.UniversalQueue()
+
+    async def _process_queue(self) -> None:
+        while self._event_loop_thread_id or not self._queue.empty():
+            func, args, future = await self._queue.get()
+            if func is not None:
+                await self._task_group.spawn(self._call_func, func, args, future)
+
+    async def __aenter__(self) -> 'BlockingPortal':
+        await super().__aenter__()
+        await self._task_group.spawn(self._process_queue)
+        return self
+
+    async def stop(self, cancel_remaining: bool = False) -> None:
+        if self._event_loop_thread_id is None:
+            return
+
+        await super().stop(cancel_remaining)
+
+        # Wake up from queue.get()
+        await self._queue.put((None, None, None))
+
+    def _spawn_task_from_thread(self, func: Callable, args: tuple, future: Future) -> None:
+        self._queue.put((func, args, future))
+
+
 #
-# Async file I/O
+# Subprocesses
 #
 
-async def aopen(*args, **kwargs):
-    fp = await run_in_thread(partial(open, *args, **kwargs))
-    return curio.file.AsyncFile(fp)
+class FileStreamWrapper(abc.ByteStream):
+    def __init__(self, stream: curio.io.FileStream):
+        super().__init__()
+        self._stream = stream
+
+    async def receive(self, max_bytes: Optional[int] = None) -> bytes:
+        data = await self._stream.read(max_bytes or 65536)
+        if data:
+            return data
+        else:
+            raise EndOfStream
+
+    async def send(self, item: bytes) -> None:
+        await self._stream.write(item)
+
+    async def send_eof(self) -> None:
+        raise NotImplementedError
+
+    async def aclose(self) -> None:
+        await self._stream.close()
+
+
+@dataclass
+class Process(abc.Process):
+    _process: curio.subprocess.Popen
+    _stdin: Optional[abc.ByteSendStream]
+    _stdout: Optional[abc.ByteReceiveStream]
+    _stderr: Optional[abc.ByteReceiveStream]
+
+    async def aclose(self) -> None:
+        if self._stdin:
+            await self._stdin.aclose()
+        if self._stdout:
+            await self._stdout.aclose()
+        if self._stderr:
+            await self._stderr.aclose()
+
+        await self.wait()
+
+    async def wait(self) -> int:
+        return await self._process.wait()
+
+    def terminate(self) -> None:
+        self._process.terminate()
+
+    def kill(self) -> None:
+        self._process.kill()
+
+    def send_signal(self, signal: int) -> None:
+        self._process.send_signal(signal)
+
+    @property
+    def pid(self) -> int:
+        return self._process.pid
+
+    @property
+    def returncode(self) -> Optional[int]:
+        return self._process.returncode
+
+    @property
+    def stdin(self) -> Optional[abc.ByteSendStream]:
+        return self._stdin
+
+    @property
+    def stdout(self) -> Optional[abc.ByteReceiveStream]:
+        return self._stdout
+
+    @property
+    def stderr(self) -> Optional[abc.ByteReceiveStream]:
+        return self._stderr
+
+
+async def open_process(command, *, shell: bool, stdin: int, stdout: int, stderr: int):
+    await checkpoint()
+    process = curio.subprocess.Popen(command, stdin=stdin, stdout=stdout, stderr=stderr,
+                                     shell=shell)
+    stdin_stream = FileStreamWrapper(process.stdin) if process.stdin else None
+    stdout_stream = FileStreamWrapper(process.stdout) if process.stdout else None
+    stderr_stream = FileStreamWrapper(process.stderr) if process.stderr else None
+    return Process(process, stdin_stream, stdout_stream, stderr_stream)
 
 
 #
 # Sockets and networking
 #
 
-_reader_tasks = {}  # type: Dict[socket.SocketType, curio.Task]
-_writer_tasks = {}  # type: Dict[socket.SocketType, curio.Task]
+_reader_tasks: Dict[socket.SocketType, curio.Task] = {}
+_writer_tasks: Dict[socket.SocketType, curio.Task] = {}
 
 
-class Socket(BaseSocket):
-    __slots__ = ()
+class _CurioSocketMixin(Generic[T_SockAddr]):
+    def __init__(self, curio_socket: curio.io.Socket):
+        self._curio_socket = curio_socket
+        self._closed = False
 
-    def _wait_readable(self):
-        return wait_socket_readable(self._raw_socket)
+    @property
+    def _raw_socket(self) -> socket.socket:
+        return self._curio_socket._socket
 
-    def _wait_writable(self):
-        return wait_socket_writable(self._raw_socket)
+    async def aclose(self) -> None:
+        if self._curio_socket.fileno() >= 0:
+            self._closed = True
+            rtask, wtask = await curio.traps._io_waiting(self._curio_socket)
+            await self._curio_socket.close()
+            if rtask:
+                await rtask.cancel(blocking=False, exc=ClosedResourceError)
+            if wtask:
+                await wtask.cancel(blocking=False, exc=ClosedResourceError)
 
-    def _notify_close(self):
-        return notify_socket_close(self._raw_socket)
+    def _convert_socket_error(self, exc: Union[OSError, AttributeError]) -> NoReturn:
+        if self._curio_socket.fileno() < 0:
+            if self._closed:
+                raise ClosedResourceError from None
+            else:
+                raise BrokenResourceError from exc
 
-    def _check_cancelled(self) -> Coroutine[Any, Any, None]:
-        return sleep(0)
+        raise exc
 
-    def _run_in_thread(self, func: Callable, *args):
-        return run_in_thread(func, *args)
+
+class SocketStream(_CurioSocketMixin, abc.SocketStream):
+    def __init__(self, curio_socket: curio.io.Socket):
+        super().__init__(curio_socket)
+        self._receive_guard = ResourceGuard('reading from')
+        self._send_guard = ResourceGuard('writing to')
+
+    async def receive(self, max_bytes: int = 65536) -> bytes:
+        with self._receive_guard:
+            await checkpoint()
+            try:
+                data = await self._curio_socket.recv(max_bytes)
+            except (OSError, AttributeError) as exc:
+                self._convert_socket_error(exc)
+
+            if data:
+                return data
+            else:
+                raise EndOfStream
+
+    async def send(self, item: bytes) -> None:
+        with self._send_guard:
+            await checkpoint()
+            try:
+                await self._curio_socket.sendall(item)
+            except (OSError, AttributeError) as exc:
+                self._convert_socket_error(exc)
+
+    async def send_eof(self) -> None:
+        await self._curio_socket.shutdown(socket.SHUT_WR)
+
+
+class SocketListener(_CurioSocketMixin, abc.SocketListener):
+    def __init__(self, raw_socket: socket.SocketType):
+        super().__init__(curio.io.Socket(raw_socket))
+        self._accept_guard = ResourceGuard('accepting connections from')
+
+    async def accept(self) -> SocketStream:
+        with self._accept_guard:
+            await checkpoint()
+            try:
+                curio_socket, _addr = await self._curio_socket.accept()
+            except (OSError, AttributeError) as exc:
+                self._convert_socket_error(exc)
+
+        if curio_socket.family in (socket.AF_INET, socket.AF_INET6):
+            curio_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+        return SocketStream(curio_socket)
+
+
+class UDPSocket(_CurioSocketMixin[IPSockAddrType], abc.UDPSocket):
+    def __init__(self, curio_socket: curio.io.Socket):
+        super().__init__(curio_socket)
+        self._receive_guard = ResourceGuard('reading from')
+        self._send_guard = ResourceGuard('writing to')
+
+    async def receive(self) -> Tuple[bytes, IPSockAddrType]:
+        with self._receive_guard:
+            await checkpoint()
+            try:
+                data, addr = await self._curio_socket.recvfrom(65536)
+                return data, convert_ipv6_sockaddr(addr)
+            except (OSError, AttributeError) as exc:
+                self._convert_socket_error(exc)
+
+    async def send(self, item: UDPPacketType) -> None:
+        with self._send_guard:
+            await checkpoint()
+            try:
+                await self._curio_socket.sendto(*item)
+            except (OSError, AttributeError) as exc:
+                self._convert_socket_error(exc)
+
+
+class ConnectedUDPSocket(_CurioSocketMixin[IPSockAddrType], abc.ConnectedUDPSocket):
+    def __init__(self, curio_socket: curio.io.Socket):
+        super().__init__(curio_socket)
+        self._receive_guard = ResourceGuard('reading from')
+        self._send_guard = ResourceGuard('writing to')
+
+    async def receive(self) -> bytes:
+        with self._receive_guard:
+            await checkpoint()
+            try:
+                return await self._curio_socket.recv(65536)
+            except (OSError, AttributeError) as exc:
+                self._convert_socket_error(exc)
+
+    async def send(self, item: bytes) -> None:
+        with self._send_guard:
+            await checkpoint()
+            try:
+                await self._curio_socket.send(item)
+            except (OSError, AttributeError) as exc:
+                self._convert_socket_error(exc)
+
+
+async def connect_tcp(host: str, port: int,
+                      bind_addr: Optional[IPSockAddrType] = None) -> SocketStream:
+    curio_socket = await curio.open_connection(host, port, source_addr=bind_addr)
+    curio_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    return SocketStream(curio_socket)
+
+
+async def connect_unix(path: str) -> SocketStream:
+    curio_socket = await curio.open_unix_connection(path)
+    return SocketStream(curio_socket)
+
+
+async def create_udp_socket(
+    family: socket.AddressFamily,
+    local_address: Optional[IPSockAddrType],
+    remote_address: Optional[IPSockAddrType],
+    reuse_port: bool
+) -> Union[UDPSocket, ConnectedUDPSocket]:
+    curio_socket = curio.socket.socket(family=family, type=socket.SOCK_DGRAM)
+
+    if reuse_port:
+        curio_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+
+    if local_address:
+        curio_socket.bind(local_address)
+
+    if remote_address:
+        await curio_socket.connect(remote_address)
+        return ConnectedUDPSocket(curio_socket)
+    else:
+        return UDPSocket(curio_socket)
 
 
 def getaddrinfo(host: Union[bytearray, bytes, str], port: Union[str, int, None], *,
@@ -478,9 +741,9 @@ getnameinfo = curio.socket.getnameinfo
 
 
 async def wait_socket_readable(sock):
-    await check_cancelled()
+    await checkpoint()
     if _reader_tasks.get(sock):
-        raise ResourceBusyError('reading from') from None
+        raise BusyResourceError('reading from') from None
 
     _reader_tasks[sock] = await curio.current_task()
     try:
@@ -495,9 +758,9 @@ async def wait_socket_readable(sock):
 
 
 async def wait_socket_writable(sock):
-    await check_cancelled()
+    await checkpoint()
     if _writer_tasks.get(sock):
-        raise ResourceBusyError('writing to') from None
+        raise BusyResourceError('writing to') from None
 
     _writer_tasks[sock] = await curio.current_task()
     try:
@@ -511,67 +774,87 @@ async def wait_socket_writable(sock):
         del _writer_tasks[sock]
 
 
-async def notify_socket_close(sock: socket.SocketType):
-    for tasks_map in _reader_tasks, _writer_tasks:
-        task = tasks_map.get(sock)
-        if task is not None:
-            await task.cancel(blocking=False)
-
-
 #
 # Synchronization
 #
 
-class Lock(curio.Lock):
-    async def __aenter__(self):
-        await check_cancelled()
-        return await super().__aenter__()
+class Lock(abc.Lock):
+    def __init__(self):
+        self._lock = curio.Lock()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    async def acquire(self) -> None:
+        await checkpoint()
+        await self._lock.acquire()
+
+    async def release(self) -> None:
+        await self._lock.release()
 
 
-class Condition(curio.Condition):
-    async def __aenter__(self):
-        await check_cancelled()
-        return await super().__aenter__()
+class Condition(abc.Condition):
+    def __init__(self, lock: Optional[Lock]):
+        curio_lock = lock._lock if lock else None
+        self._condition = curio.Condition(curio_lock)
+
+    async def acquire(self) -> None:
+        await checkpoint()
+        await self._condition.acquire()
+
+    async def release(self) -> None:
+        await self._condition.release()
+
+    def locked(self) -> bool:
+        return self._condition.locked()
+
+    async def notify(self, n=1):
+        await self._condition.notify(n)
+
+    async def notify_all(self):
+        await self._condition.notify_all()
 
     async def wait(self):
-        await check_cancelled()
-        return await super().wait()
+        await checkpoint()
+        return await self._condition.wait()
 
 
-class Event(curio.Event):
+class Event(abc.Event):
+    def __init__(self):
+        self._event = curio.Event()
+
+    async def set(self) -> None:
+        await self._event.set()
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
+
     async def wait(self):
-        await check_cancelled()
-        return await super().wait()
+        await checkpoint()
+        return await self._event.wait()
 
 
-class Semaphore(curio.Semaphore):
-    async def __aenter__(self):
-        await check_cancelled()
-        return await super().__aenter__()
+class Semaphore(abc.Semaphore):
+    def __init__(self, value: int):
+        self._semaphore = curio.Semaphore(value)
+
+    async def acquire(self) -> None:
+        await checkpoint()
+        await self._semaphore.acquire()
+
+    async def release(self) -> None:
+        await self._semaphore.release()
+
+    @property
+    def value(self):
+        return self._semaphore.value
 
 
-class Queue(curio.Queue):
-    async def get(self):
-        await check_cancelled()
-        return await super().get()
-
-    async def put(self, item):
-        await check_cancelled()
-        return await super().put(item)
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        await check_cancelled()
-        return await super().get()
-
-
-class CapacityLimiter:
+class CapacityLimiter(abc.CapacityLimiter):
     def __init__(self, total_tokens: float):
         self._set_total_tokens(total_tokens)
-        self._borrowers = set()  # type: Set[Any]
-        self._wait_queue = OrderedDict()  # type: Dict[Any, curio.Event]
+        self._borrowers: Set[Any] = set()
+        self._wait_queue: Dict[Any, curio.Event] = OrderedDict()
 
     async def __aenter__(self):
         await self.acquire()
@@ -668,20 +951,13 @@ def current_default_thread_limiter():
 
 _default_thread_limiter = CapacityLimiter(40)
 
-abc.Lock.register(Lock)
-abc.Condition.register(Condition)
-abc.Event.register(Event)
-abc.Semaphore.register(Semaphore)
-abc.Queue.register(Queue)
-abc.CapacityLimiter.register(CapacityLimiter)
-
 
 #
 # Operating system signals
 #
 
-_signal_queues = defaultdict(list)  # type: DefaultDict[int, List[curio.UniversalQueue]]
-_original_signal_handlers = {}  # type:  Dict[int, Any]
+_signal_queues: DefaultDict[int, List[curio.UniversalQueue]] = defaultdict(list)
+_original_signal_handlers:  Dict[int, Any] = {}
 
 
 def _receive_signal(sig: int, frame) -> None:
@@ -689,16 +965,14 @@ def _receive_signal(sig: int, frame) -> None:
         queue.put(sig)
 
 
-@async_generator
 async def _iterate_signals(queue: curio.UniversalQueue):
     while True:
         sig = await queue.get()
-        await yield_(sig)
+        yield sig
 
 
 @asynccontextmanager
-@async_generator
-async def receive_signals(*signals: int):
+async def open_signal_receiver(*signals: int):
     queue = curio.UniversalQueue()
     try:
         for sig in signals:
@@ -708,7 +982,7 @@ async def receive_signals(*signals: int):
                 _original_signal_handlers[sig] = previous_handler
 
         gen = _iterate_signals(queue)
-        await yield_(gen)
+        yield gen
     finally:
         await gen.aclose()
 
@@ -754,8 +1028,8 @@ async def wait_all_tasks_blocked() -> None:
             # Consider any task doing sleep(0) as not being blocked
             awaitable = task.coro.cr_await
             while inspect.iscoroutine(awaitable) and hasattr(awaitable, 'cr_code'):
-                if (awaitable.cr_code is sleep.__code__
-                        and awaitable.cr_frame.f_locals['delay'] == 0):
+                if (awaitable.cr_code is curio.sleep.__code__
+                        and awaitable.cr_frame.f_locals['seconds'] == 0):
                     awaitable = None
                 elif awaitable.cr_await:
                     awaitable = awaitable.cr_await
@@ -767,3 +1041,19 @@ async def wait_all_tasks_blocked() -> None:
                 break
         else:
             return
+
+
+class TestRunner(abc.TestRunner):
+    def __init__(self, **options):
+        self._kernel = curio.Kernel(**options)
+
+    def close(self) -> None:
+        self._kernel.run(shutdown=True)
+
+    def call(self, func: Callable[..., Awaitable], *args, **kwargs):
+        async def call():
+            # This wrapper is needed because curio kernels cannot run() the asend() method of async
+            # generators because it's neither a coroutine object or a coroutine function
+            return await func(*args, **kwargs)
+
+        return self._kernel.run(call)

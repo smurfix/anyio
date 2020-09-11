@@ -13,10 +13,15 @@ The manual
    tasks
    cancellation
    synchronization
-   threads
-   fileio
+   streams
+   typedattrs
    networking
+   threads
+   subprocesses
+   fileio
    signals
    testing
    api
+   support
+   contributing
    versionhistory

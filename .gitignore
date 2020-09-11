@@ -14,4 +14,6 @@ __pycache__
 .tox
 .idea
 /.pybuild
+.cache
+.local
 .pre-commit-config.yaml

@@ -5,13 +5,25 @@ Event loop
 ----------
 
 .. autofunction:: anyio.run
-
-Miscellaneous
--------------
-
-.. autofunction:: anyio.finalize
-.. autofunction:: anyio.sleep(delay)
+.. autofunction:: anyio.get_all_backends
 .. autofunction:: anyio.get_cancelled_exc_class
+.. autofunction:: anyio.sleep
+.. autofunction:: anyio.current_time
+
+Asynchronous resources
+----------------------
+
+.. autofunction:: anyio.aclose_forcefully
+
+.. autoclass:: anyio.abc.AsyncResource
+
+Typed attributes
+----------------
+
+.. autofunction:: anyio.typed_attribute
+
+.. autoclass:: anyio.TypedAttributeSet
+.. autoclass:: anyio.TypedAttributeProvider
 
 Timeouts and cancellation
 -------------------------
@@ -20,10 +32,8 @@ Timeouts and cancellation
 .. autofunction:: anyio.move_on_after
 .. autofunction:: anyio.fail_after
 .. autofunction:: anyio.current_effective_deadline
-.. autofunction:: anyio.current_time
 
 .. autoclass:: anyio.abc.CancelScope
-    :members:
 
 Task groups
 -----------
@@ -31,48 +41,89 @@ Task groups
 .. autofunction:: anyio.create_task_group
 
 .. autoclass:: anyio.abc.TaskGroup
-    :members:
 
 Threads
 -------
 
-.. autofunction:: anyio.run_in_thread
+.. autofunction:: anyio.run_sync_in_worker_thread
 .. autofunction:: anyio.run_async_from_thread
-.. autofunction:: anyio.current_default_thread_limiter
+.. autofunction:: anyio.current_default_worker_thread_limiter
+.. autofunction:: anyio.create_blocking_portal
+.. autofunction:: anyio.start_blocking_portal
+
+.. autoclass:: anyio.abc.BlockingPortal
 
 Async file I/O
 --------------
 
-.. autofunction:: anyio.aopen
+.. autofunction:: anyio.open_file
 
-.. autoclass:: anyio.abc.AsyncFile
+.. autoclass:: anyio.AsyncFile
+
+
+Streams and stream wrappers
+---------------------------
+
+.. autofunction:: anyio.create_memory_object_stream
+
+.. autoclass:: anyio.abc.UnreliableObjectReceiveStream()
+.. autoclass:: anyio.abc.UnreliableObjectSendStream()
+.. autoclass:: anyio.abc.UnreliableObjectStream()
+.. autoclass:: anyio.abc.ObjectReceiveStream()
+.. autoclass:: anyio.abc.ObjectSendStream()
+.. autoclass:: anyio.abc.ObjectStream()
+.. autoclass:: anyio.abc.ByteReceiveStream
+.. autoclass:: anyio.abc.ByteSendStream
+.. autoclass:: anyio.abc.ByteStream
+.. autoclass:: anyio.abc.Listener
+
+.. autodata:: anyio.abc.AnyUnreliableByteReceiveStream
+.. autodata:: anyio.abc.AnyUnreliableByteSendStream
+.. autodata:: anyio.abc.AnyUnreliableByteStream
+.. autodata:: anyio.abc.AnyByteReceiveStream
+.. autodata:: anyio.abc.AnyByteSendStream
+.. autodata:: anyio.abc.AnyByteStream
+
+.. autoclass:: anyio.streams.buffered.BufferedByteReceiveStream
+.. autoclass:: anyio.streams.memory.MemoryObjectReceiveStream
+.. autoclass:: anyio.streams.memory.MemoryObjectSendStream
+.. autoclass:: anyio.streams.stapled.MultiListener
+.. autoclass:: anyio.streams.stapled.StapledByteStream
+.. autoclass:: anyio.streams.stapled.StapledObjectStream
+.. autoclass:: anyio.streams.text.TextReceiveStream
+.. autoclass:: anyio.streams.text.TextSendStream
+.. autoclass:: anyio.streams.text.TextStream
+.. autoclass:: anyio.streams.tls.TLSAttribute
+.. autoclass:: anyio.streams.tls.TLSStream
+.. autoclass:: anyio.streams.tls.TLSListener
 
 Sockets and networking
 ----------------------
 
 .. autofunction:: anyio.connect_tcp
 .. autofunction:: anyio.connect_unix
-.. autofunction:: anyio.create_tcp_server
-.. autofunction:: anyio.create_unix_server
+.. autofunction:: anyio.create_tcp_listener
+.. autofunction:: anyio.create_unix_listener
 .. autofunction:: anyio.create_udp_socket
+.. autofunction:: anyio.create_connected_udp_socket
 .. autofunction:: anyio.getaddrinfo
 .. autofunction:: anyio.getnameinfo
 .. autofunction:: anyio.wait_socket_readable
 .. autofunction:: anyio.wait_socket_writable
-.. autofunction:: anyio.notify_socket_close
 
-.. autoclass:: anyio.abc.Stream
-    :members:
+.. autoclass:: anyio.abc.SocketAttribute
+.. autoclass:: anyio.abc.SocketStream()
+.. autoclass:: anyio.abc.SocketListener()
+.. autoclass:: anyio.abc.UDPSocket()
+.. autoclass:: anyio.abc.ConnectedUDPSocket()
 
-.. autoclass:: anyio.abc.SocketStream
-    :members:
-    :show-inheritance:
+Subprocesses
+------------
 
-.. autoclass:: anyio.abc.SocketStreamServer
-    :members:
+.. autofunction:: anyio.run_process
+.. autofunction:: anyio.open_process
 
-.. autoclass:: anyio.abc.UDPSocket
-    :members:
+.. autoclass:: anyio.abc.Process
 
 Synchronization
 ---------------
@@ -81,31 +132,18 @@ Synchronization
 .. autofunction:: anyio.create_lock
 .. autofunction:: anyio.create_event
 .. autofunction:: anyio.create_condition
-.. autofunction:: anyio.create_queue
 .. autofunction:: anyio.create_capacity_limiter
 
 .. autoclass:: anyio.abc.Semaphore
-    :members:
-
 .. autoclass:: anyio.abc.Lock
-    :members:
-
 .. autoclass:: anyio.abc.Event
-    :members:
-
 .. autoclass:: anyio.abc.Condition
-    :members:
-
-.. autoclass:: anyio.abc.Queue
-    :members:
-
 .. autoclass:: anyio.abc.CapacityLimiter
-    :members:
 
 Operating system signals
 ------------------------
 
-.. autofunction:: anyio.receive_signals
+.. autofunction:: anyio.open_signal_receiver
 
 Testing and debugging
 ---------------------
@@ -114,3 +152,16 @@ Testing and debugging
 .. autofunction:: anyio.get_current_task
 .. autofunction:: anyio.get_running_tasks
 .. autofunction:: anyio.wait_all_tasks_blocked
+
+Exceptions
+----------
+
+.. autoexception:: anyio.BrokenResourceError
+.. autoexception:: anyio.BusyResourceError
+.. autoexception:: anyio.ClosedResourceError
+.. autoexception:: anyio.DelimiterNotFound
+.. autoexception:: anyio.EndOfStream
+.. autoexception:: anyio.ExceptionGroup
+.. autoexception:: anyio.IncompleteRead
+.. autoexception:: anyio.TypedAttributeLookupError
+.. autoexception:: anyio.WouldBlock

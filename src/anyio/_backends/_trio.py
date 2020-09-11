@@ -1,23 +1,40 @@
-import math
+import socket
+import sys
+from concurrent.futures import Future
+from dataclasses import dataclass
 from types import TracebackType
-from typing import Callable, Optional, List, Type, Union
+from typing import (
+    Awaitable, Callable, Generic, List, NoReturn, Optional, Tuple, Type, TypeVar, Union)
 
 import trio.from_thread
-from async_generator import async_generator, yield_, asynccontextmanager, aclosing
+from outcome import Error, Value
 from trio.to_thread import run_sync
 
-from .. import abc, claim_worker_thread, T_Retval, TaskInfo
-from ..exceptions import (
-    ExceptionGroup as BaseExceptionGroup, ClosedResourceError, ResourceBusyError, WouldBlock)
-from .._networking import BaseSocket
+from .. import TaskInfo, abc
+from .._core._eventloop import claim_worker_thread
+from .._core._exceptions import (
+    BrokenResourceError, BusyResourceError, ClosedResourceError, EndOfStream)
+from .._core._exceptions import ExceptionGroup as BaseExceptionGroup
+from .._core._exceptions import WouldBlock
+from .._core._sockets import convert_ipv6_sockaddr
+from .._core._synchronization import ResourceGuard
+from ..abc.sockets import IPSockAddrType, UDPPacketType
 
 try:
-    import trio.lowlevel as trio_lowlevel
+    from trio import lowlevel as trio_lowlevel
 except ImportError:
-    import trio.hazmat as trio_lowlevel
-    from trio.hazmat import wait_readable, wait_writable, notify_closing
+    from trio import hazmat as trio_lowlevel
+    from trio.hazmat import wait_readable, wait_writable
 else:
-    from trio.lowlevel import wait_readable, wait_writable, notify_closing
+    from trio.lowlevel import wait_readable, wait_writable
+
+if sys.version_info >= (3, 7):
+    from contextlib import asynccontextmanager
+else:
+    from async_generator import asynccontextmanager
+
+T_Retval = TypeVar('T_Retval')
+T_SockAddr = TypeVar('T_SockAddr', str, IPSockAddrType)
 
 
 #
@@ -31,7 +48,6 @@ run = trio.run
 # Miscellaneous
 #
 
-finalize = aclosing
 sleep = trio.sleep
 
 
@@ -40,9 +56,10 @@ sleep = trio.sleep
 #
 
 CancelledError = trio.Cancelled
+checkpoint = trio.lowlevel.checkpoint
 
 
-class CancelScope:
+class CancelScope(abc.CancelScope):
     __slots__ = '__original'
 
     def __init__(self, original: Optional[trio.CancelScope] = None, **kwargs):
@@ -78,24 +95,19 @@ class CancelScope:
         return self.__original.shield
 
 
-abc.CancelScope.register(CancelScope)
-
-
 @asynccontextmanager
-@async_generator
 async def move_on_after(seconds, shield):
     with trio.move_on_after(seconds) as scope:
         scope.shield = shield
-        await yield_(CancelScope(scope))
+        yield CancelScope(scope)
 
 
 @asynccontextmanager
-@async_generator
 async def fail_after(seconds, shield):
     try:
         with trio.fail_after(seconds) as cancel_scope:
             cancel_scope.shield = shield
-            await yield_(CancelScope(cancel_scope))
+            yield CancelScope(cancel_scope)
     except trio.TooSlowError as exc:
         raise TimeoutError().with_traceback(exc.__traceback__) from None
 
@@ -154,8 +166,9 @@ abc.TaskGroup.register(TaskGroup)
 # Threads
 #
 
-async def run_in_thread(func: Callable[..., T_Retval], *args, cancellable: bool = False,
-                        limiter: Optional['CapacityLimiter'] = None) -> T_Retval:
+async def run_sync_in_worker_thread(
+        func: Callable[..., T_Retval], *args, cancellable: bool = False,
+        limiter: Optional['CapacityLimiter'] = None) -> T_Retval:
     def wrapper():
         with claim_worker_thread('trio'):
             return func(*args)
@@ -166,38 +179,284 @@ async def run_in_thread(func: Callable[..., T_Retval], *args, cancellable: bool 
 run_async_from_thread = trio.from_thread.run
 
 
+class BlockingPortal(abc.BlockingPortal):
+    __slots__ = '_token'
+
+    def __init__(self):
+        super().__init__()
+        self._token = trio.lowlevel.current_trio_token()
+
+    def _spawn_task_from_thread(self, func: Callable, args: tuple, future: Future) -> None:
+        return trio.from_thread.run(self._task_group.spawn, self._call_func, func, args, future,
+                                    trio_token=self._token)
+
+
 #
-# Async file I/O
+# Subprocesses
 #
 
-async def aopen(*args, **kwargs):
-    f = await trio.open_file(*args, **kwargs)
-    f.close = f.aclose
-    return f
+@dataclass
+class ReceiveStreamWrapper(abc.ByteReceiveStream):
+    _stream: trio.abc.ReceiveStream
+
+    async def receive(self, max_bytes: Optional[int] = None) -> bytes:
+        data = await self._stream.receive_some(max_bytes)
+        if data:
+            return data
+        else:
+            raise EndOfStream
+
+    async def aclose(self) -> None:
+        await self._stream.aclose()
+
+
+@dataclass
+class SendStreamWrapper(abc.ByteSendStream):
+    _stream: trio.abc.SendStream
+
+    async def send(self, item: bytes) -> None:
+        await self._stream.send_all(item)
+
+    async def aclose(self) -> None:
+        await self._stream.aclose()
+
+
+@dataclass
+class Process(abc.Process):
+    _process: trio.Process
+    _stdin: Optional[abc.ByteSendStream]
+    _stdout: Optional[abc.ByteReceiveStream]
+    _stderr: Optional[abc.ByteReceiveStream]
+
+    async def aclose(self) -> None:
+        if self._stdin:
+            await self._stdin.aclose()
+        if self._stdout:
+            await self._stdout.aclose()
+        if self._stderr:
+            await self._stderr.aclose()
+
+        await self.wait()
+
+    async def wait(self) -> int:
+        return await self._process.wait()
+
+    def terminate(self) -> None:
+        self._process.terminate()
+
+    def kill(self) -> None:
+        self._process.kill()
+
+    def send_signal(self, signal: int) -> None:
+        self._process.send_signal(signal)
+
+    @property
+    def pid(self) -> int:
+        return self._process.pid
+
+    @property
+    def returncode(self) -> Optional[int]:
+        return self._process.returncode
+
+    @property
+    def stdin(self) -> Optional[abc.ByteSendStream]:
+        return self._stdin
+
+    @property
+    def stdout(self) -> Optional[abc.ByteReceiveStream]:
+        return self._stdout
+
+    @property
+    def stderr(self) -> Optional[abc.ByteReceiveStream]:
+        return self._stderr
+
+
+async def open_process(command, *, shell: bool, stdin: int, stdout: int, stderr: int):
+    process = await trio.open_process(command, stdin=stdin, stdout=stdout, stderr=stderr,
+                                      shell=shell)
+    stdin_stream = SendStreamWrapper(process.stdin) if process.stdin else None
+    stdout_stream = ReceiveStreamWrapper(process.stdout) if process.stdout else None
+    stderr_stream = ReceiveStreamWrapper(process.stderr) if process.stderr else None
+    return Process(process, stdin_stream, stdout_stream, stderr_stream)
 
 
 #
 # Sockets and networking
 #
 
-class Socket(BaseSocket):
-    __slots__ = ()
+class _TrioSocketMixin(Generic[T_SockAddr]):
+    def __init__(self, trio_socket):
+        self._trio_socket = trio_socket
+        self._closed = False
 
-    def _wait_readable(self):
-        return wait_socket_readable(self._raw_socket)
+    def _check_closed(self) -> None:
+        if self._closed:
+            raise ClosedResourceError
+        if self._trio_socket.fileno() < 0:
+            raise BrokenResourceError
 
-    def _wait_writable(self):
-        return wait_socket_writable(self._raw_socket)
+    @property
+    def _raw_socket(self) -> socket.socket:
+        return self._trio_socket._sock
 
-    async def _notify_close(self):
-        if self._raw_socket.fileno() >= 0:
-            notify_closing(self._raw_socket)
+    async def aclose(self) -> None:
+        if self._trio_socket.fileno() >= 0:
+            self._closed = True
+            self._trio_socket.close()
 
-    def _check_cancelled(self):
-        return trio_lowlevel.checkpoint()
+    def _convert_socket_error(self, exc: BaseException) -> 'NoReturn':
+        if isinstance(exc, trio.ClosedResourceError):
+            raise ClosedResourceError from exc
+        elif isinstance(exc, OSError) and self._trio_socket.fileno() < 0:
+            if self._closed:
+                raise ClosedResourceError from None
+            else:
+                raise BrokenResourceError from exc
 
-    def _run_in_thread(self, func: Callable, *args):
-        return run_in_thread(func, *args)
+        raise exc
+
+
+class SocketStream(_TrioSocketMixin, abc.SocketStream):
+    def __init__(self, trio_socket):
+        super().__init__(trio_socket)
+        self._receive_guard = ResourceGuard('reading from')
+        self._send_guard = ResourceGuard('writing to')
+
+    async def receive(self, max_bytes: int = 65536) -> bytes:
+        with self._receive_guard:
+            try:
+                data = await self._trio_socket.recv(max_bytes)
+            except BaseException as exc:
+                self._convert_socket_error(exc)
+
+            if data:
+                return data
+            else:
+                raise EndOfStream
+
+    async def send(self, item: bytes) -> None:
+        with self._send_guard:
+            view = memoryview(item)
+            while view:
+                try:
+                    bytes_sent = await self._trio_socket.send(view)
+                except BaseException as exc:
+                    self._convert_socket_error(exc)
+
+                view = view[bytes_sent:]
+
+    async def send_eof(self) -> None:
+        self._trio_socket.shutdown(socket.SHUT_WR)
+
+
+class SocketListener(_TrioSocketMixin, abc.SocketListener):
+    def __init__(self, raw_socket: socket.SocketType):
+        super().__init__(trio.socket.from_stdlib_socket(raw_socket))
+        self._accept_guard = ResourceGuard('accepting connections from')
+
+    async def accept(self) -> SocketStream:
+        with self._accept_guard:
+            try:
+                trio_socket, _addr = await self._trio_socket.accept()
+            except BaseException as exc:
+                self._convert_socket_error(exc)
+
+        if trio_socket.family in (socket.AF_INET, socket.AF_INET6):
+            trio_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+        return SocketStream(trio_socket)
+
+
+class UDPSocket(_TrioSocketMixin[IPSockAddrType], abc.UDPSocket):
+    def __init__(self, trio_socket):
+        super().__init__(trio_socket)
+        self._receive_guard = ResourceGuard('reading from')
+        self._send_guard = ResourceGuard('writing to')
+
+    async def receive(self) -> Tuple[bytes, IPSockAddrType]:
+        with self._receive_guard:
+            try:
+                data, addr = await self._trio_socket.recvfrom(65536)
+                return data, convert_ipv6_sockaddr(addr)
+            except BaseException as exc:
+                self._convert_socket_error(exc)
+
+    async def send(self, item: UDPPacketType) -> None:
+        with self._send_guard:
+            try:
+                await self._trio_socket.sendto(*item)
+            except BaseException as exc:
+                self._convert_socket_error(exc)
+
+
+class ConnectedUDPSocket(_TrioSocketMixin[IPSockAddrType], abc.ConnectedUDPSocket):
+    def __init__(self, trio_socket):
+        super().__init__(trio_socket)
+        self._receive_guard = ResourceGuard('reading from')
+        self._send_guard = ResourceGuard('writing to')
+
+    async def receive(self) -> bytes:
+        with self._receive_guard:
+            try:
+                return await self._trio_socket.recv(65536)
+            except BaseException as exc:
+                self._convert_socket_error(exc)
+
+    async def send(self, item: bytes) -> None:
+        with self._send_guard:
+            try:
+                await self._trio_socket.send(item)
+            except BaseException as exc:
+                self._convert_socket_error(exc)
+
+
+async def connect_tcp(host: str, port: int,
+                      local_address: Optional[IPSockAddrType] = None) -> SocketStream:
+    family = socket.AF_INET6 if ':' in host else socket.AF_INET
+    trio_socket = trio.socket.socket(family)
+    trio_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    if local_address:
+        await trio_socket.bind(local_address)
+
+    try:
+        await trio_socket.connect((host, port))
+    except BaseException:
+        trio_socket.close()
+        raise
+
+    return SocketStream(trio_socket)
+
+
+async def connect_unix(path: str) -> SocketStream:
+    trio_socket = trio.socket.socket(socket.AF_UNIX)
+    try:
+        await trio_socket.connect(path)
+    except BaseException:
+        trio_socket.close()
+        raise
+
+    return SocketStream(trio_socket)
+
+
+async def create_udp_socket(
+    family: socket.AddressFamily,
+    local_address: Optional[IPSockAddrType],
+    remote_address: Optional[IPSockAddrType],
+    reuse_port: bool
+) -> Union[UDPSocket, ConnectedUDPSocket]:
+    trio_socket = trio.socket.socket(family=family, type=socket.SOCK_DGRAM)
+
+    if reuse_port:
+        trio_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+
+    if local_address:
+        await trio_socket.bind(local_address)
+
+    if remote_address:
+        await trio_socket.connect(remote_address)
+        return ConnectedUDPSocket(trio_socket)
+    else:
+        return UDPSocket(trio_socket)
 
 
 getaddrinfo = trio.socket.getaddrinfo
@@ -210,7 +469,7 @@ async def wait_socket_readable(sock):
     except trio.ClosedResourceError as exc:
         raise ClosedResourceError().with_traceback(exc.__traceback__) from None
     except trio.BusyResourceError:
-        raise ResourceBusyError('reading from') from None
+        raise BusyResourceError('reading from') from None
 
 
 async def wait_socket_writable(sock):
@@ -219,18 +478,26 @@ async def wait_socket_writable(sock):
     except trio.ClosedResourceError as exc:
         raise ClosedResourceError().with_traceback(exc.__traceback__) from None
     except trio.BusyResourceError:
-        raise ResourceBusyError('writing to') from None
-
-
-async def notify_socket_close(sock):
-    return notify_closing(sock)
+        raise BusyResourceError('writing to') from None
 
 
 #
 # Synchronization
 #
 
-Lock = trio.Lock
+class Lock(abc.Lock):
+    def __init__(self):
+        self._lock = trio.Lock()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    async def acquire(self) -> None:
+        await trio.lowlevel.checkpoint()
+        await self._lock.acquire()
+
+    async def release(self) -> None:
+        self._lock.release()
 
 
 class Event:
@@ -240,10 +507,6 @@ class Event:
     async def set(self) -> None:
         self._event.set()
 
-    def clear(self):
-        if self._event.is_set():
-            self._event = trio.Event()
-
     def is_set(self) -> bool:
         return self._event.is_set()
 
@@ -251,15 +514,18 @@ class Event:
         await self._event.wait()
 
 
-class Condition:
+class Condition(abc.Condition):
     def __init__(self, lock: Optional[trio.Lock] = None):
         self._cond = trio.Condition(lock=lock)
 
-    async def __aenter__(self):
-        await self._cond.__aenter__()
+    async def acquire(self) -> None:
+        return await self._cond.acquire()
 
-    async def __aexit__(self, *exc_info):
-        return await self._cond.__aexit__(*exc_info)
+    async def release(self) -> None:
+        self._cond.release()
+
+    def locked(self):
+        return self._cond.locked()
 
     async def notify(self, n: int = 1) -> None:
         self._cond.notify(n)
@@ -267,42 +533,23 @@ class Condition:
     async def notify_all(self) -> None:
         self._cond.notify_all()
 
-    def locked(self):
-        return self._cond.locked()
-
     async def wait(self):
         return await self._cond.wait()
 
 
-Semaphore = trio.Semaphore
+class Semaphore(abc.Semaphore):
+    def __init__(self, value: int):
+        self._semaphore = trio.Semaphore(value)
 
+    async def acquire(self) -> None:
+        await self._semaphore.acquire()
 
-class Queue:
-    def __init__(self, max_items: int) -> None:
-        max_buffer_size = max_items if max_items > 0 else math.inf
-        self._send_channel, self._receive_channel = trio.open_memory_channel(max_buffer_size)
+    async def release(self) -> None:
+        self._semaphore.release()
 
-    def empty(self):
-        return self._receive_channel.statistics().current_buffer_used == 0
-
-    def full(self):
-        statistics = self._receive_channel.statistics()
-        return statistics.current_buffer_used >= statistics.max_buffer_size
-
-    def qsize(self) -> int:
-        return self._receive_channel.statistics().current_buffer_used
-
-    async def put(self, item) -> None:
-        await self._send_channel.send(item)
-
-    async def get(self):
-        return await self._receive_channel.receive()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        return await self._receive_channel.receive()
+    @property
+    def value(self) -> int:
+        return self._semaphore.value
 
 
 class CapacityLimiter(abc.CapacityLimiter):
@@ -363,23 +610,14 @@ def current_default_thread_limiter():
     return CapacityLimiter(native_limiter)
 
 
-abc.Lock.register(Lock)
-abc.Condition.register(Condition)
-abc.Event.register(Event)
-abc.Semaphore.register(Semaphore)
-abc.Queue.register(Queue)
-abc.CapacityLimiter.register(CapacityLimiter)
-
-
 #
 # Signal handling
 #
 
 @asynccontextmanager
-@async_generator
-async def receive_signals(*signals: int):
+async def open_signal_receiver(*signals: int):
     with trio.open_signal_receiver(*signals) as cm:
-        await yield_(cm)
+        yield cm
 
 
 #
@@ -401,7 +639,7 @@ async def get_running_tasks() -> List[TaskInfo]:
     task_infos = [TaskInfo(id(root_task), None, root_task.name, root_task.coro)]
     nurseries = root_task.child_nurseries
     while nurseries:
-        new_nurseries = []  # type: List[trio.Nursery]
+        new_nurseries: List[trio.Nursery] = []
         for nursery in nurseries:
             for task in nursery.child_tasks:
                 task_infos.append(
@@ -416,3 +654,53 @@ async def get_running_tasks() -> List[TaskInfo]:
 def wait_all_tasks_blocked():
     import trio.testing
     return trio.testing.wait_all_tasks_blocked()
+
+
+class TestRunner(abc.TestRunner):
+    def __init__(self, **options):
+        from collections import deque
+        from queue import Queue
+
+        self._call_queue = Queue()
+        self._result_queue = deque()
+        self._stop_event: Optional[trio.Event] = None
+        self._nursery: Optional[trio.Nursery] = None
+        self._options = options
+
+    async def _trio_main(self) -> None:
+        self._stop_event = trio.Event()
+        async with trio.open_nursery() as self._nursery:
+            await self._stop_event.wait()
+
+    async def _call_func(self, func, args, kwargs):
+        try:
+            retval = await func(*args, **kwargs)
+        except BaseException as exc:
+            self._result_queue.append(Error(exc))
+            raise
+        else:
+            self._result_queue.append(Value(retval))
+
+    def _main_task_finished(self, outcome) -> None:
+        self._nursery = None
+
+    def close(self) -> None:
+        if self._stop_event:
+            self._stop_event.set()
+            while self._nursery is not None:
+                self._call_queue.get()()
+
+    def call(self, func: Callable[..., Awaitable], *args, **kwargs):
+        if self._nursery is None:
+            trio.lowlevel.start_guest_run(
+                self._trio_main, run_sync_soon_threadsafe=self._call_queue.put,
+                done_callback=self._main_task_finished, **self._options)
+            while self._nursery is None:
+                self._call_queue.get()()
+
+        self._nursery.start_soon(self._call_func, func, args, kwargs)
+        while not self._result_queue:
+            self._call_queue.get()()
+
+        outcome = self._result_queue.pop()
+        return outcome.unwrap()

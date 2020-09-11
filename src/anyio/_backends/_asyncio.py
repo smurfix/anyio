@@ -1,32 +1,84 @@
 import asyncio
 import concurrent.futures
 import math
-import os
 import socket
 import sys
-from collections import OrderedDict
-from functools import partial
-from socket import AddressFamily, SocketKind
+from collections import OrderedDict, deque
+from concurrent.futures import Future
+from dataclasses import dataclass
+from functools import wraps
+from inspect import isgenerator
+from socket import AddressFamily, SocketKind, SocketType
 from threading import Thread
 from types import TracebackType
 from typing import (
-    Callable, Set, Optional, Union, Tuple, cast, Coroutine, Any, Awaitable, TypeVar, Generator,
-    List, Dict, Sequence, Type)
+    Any, Awaitable, Callable, Coroutine, Deque, Dict, Generator, List, Optional, Sequence, Set,
+    Tuple, Type, TypeVar, Union, cast)
 from weakref import WeakKeyDictionary
 
-from async_generator import async_generator, yield_, asynccontextmanager, aclosing
+from .. import TaskInfo, abc
+from .._core._eventloop import claim_worker_thread, threadlocals
+from .._core._exceptions import (
+    BrokenResourceError, BusyResourceError, ClosedResourceError, EndOfStream)
+from .._core._exceptions import ExceptionGroup as BaseExceptionGroup
+from .._core._exceptions import WouldBlock
+from .._core._sockets import GetAddrInfoReturnType, convert_ipv6_sockaddr
+from .._core._synchronization import ResourceGuard
+from ..abc.sockets import IPSockAddrType, UDPPacketType
 
-from .. import (
-    abc, claim_worker_thread, _local, T_Retval, TaskInfo, GetAddrInfoReturnType,
-    SockaddrType)
-from ..exceptions import (
-    ExceptionGroup as BaseExceptionGroup, ClosedResourceError, ResourceBusyError, WouldBlock)
-from .._networking import BaseSocket
+if sys.version_info >= (3, 7):
+    from asyncio import all_tasks, create_task, current_task, get_running_loop
+    from asyncio import run as native_run
+    from contextlib import asynccontextmanager
+else:
+    from async_generator import asynccontextmanager
 
-try:
-    from asyncio import create_task, get_running_loop, current_task, all_tasks
-except ImportError:
     _T = TypeVar('_T')
+
+    def native_run(main, *, debug=False):
+        # Snatched from Python 3.7
+        from asyncio import coroutines, events, tasks
+
+        def _cancel_all_tasks(loop):
+            to_cancel = all_tasks(loop)
+            if not to_cancel:
+                return
+
+            for task in to_cancel:
+                task.cancel()
+
+            loop.run_until_complete(
+                tasks.gather(*to_cancel, loop=loop, return_exceptions=True))
+
+            for task in to_cancel:
+                if task.cancelled():
+                    continue
+                if task.exception() is not None:
+                    loop.call_exception_handler({
+                        'message': 'unhandled exception during asyncio.run() shutdown',
+                        'exception': task.exception(),
+                        'task': task,
+                    })
+
+        if events._get_running_loop() is not None:
+            raise RuntimeError(
+                "asyncio.run() cannot be called from a running event loop")
+
+        if not coroutines.iscoroutine(main):
+            raise ValueError("a coroutine was expected, got {!r}".format(main))
+
+        loop = events.new_event_loop()
+        try:
+            events.set_event_loop(loop)
+            loop.set_debug(debug)
+            return loop.run_until_complete(main)
+        finally:
+            try:
+                _cancel_all_tasks(loop)
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            finally:
+                events.set_event_loop(None)
+                loop.close()
 
     def create_task(coro: Union[Generator[Any, None, _T], Awaitable[_T]], *,  # type: ignore
                     name: Optional[str] = None) -> asyncio.Task:
@@ -54,6 +106,8 @@ except ImportError:
 
         return asyncio.Task.current_task(loop)
 
+T_Retval = TypeVar('T_Retval')
+
 # Check whether there is native support for task names in asyncio (3.8+)
 _native_task_names = hasattr(asyncio.Task, 'get_name')
 
@@ -68,63 +122,50 @@ def get_callable_name(func: Callable) -> str:
 # Event loop
 #
 
-def run(func: Callable[..., T_Retval], *args, debug: bool = False, use_uvloop: bool = True,
-        policy: Optional[asyncio.AbstractEventLoopPolicy] = None) -> T_Retval:
-    async def wrapper():
-        nonlocal exception, retval
-        try:
-            retval = await func(*args)
-        except BaseException as exc:
-            exception = exc
-
-    # On CPython, use uvloop when possible if no other policy has been given and if not explicitly
-    # disabled
+def _maybe_set_event_loop_policy(policy: Optional[asyncio.AbstractEventLoopPolicy],
+                                 use_uvloop: bool) -> None:
+    # On CPython, use uvloop when possible if no other policy has been given and if not
+    # explicitly disabled
     if policy is None and use_uvloop and sys.implementation.name == 'cpython':
         try:
             import uvloop
         except ImportError:
             pass
         else:
+            # Test for missing shutdown_default_executor() (uvloop 0.14.0 and earlier)
             if (not hasattr(asyncio.AbstractEventLoop, 'shutdown_default_executor')
                     or hasattr(uvloop.loop.Loop, 'shutdown_default_executor')):
                 policy = uvloop.EventLoopPolicy()
 
-    # Must be explicitly set on Python 3.8 for now or wait_socket_(readable|writable) won't work
-    if policy is None and sys.platform == 'win32' and sys.version_info >= (3, 8):
-        policy = asyncio.WindowsSelectorEventLoopPolicy()  # type: ignore
-
     if policy is not None:
         asyncio.set_event_loop_policy(policy)
 
-    # We use loop.run_until_complete() instead of asyncio.run() because the latter cancels all
-    # tasks and shuts down all async generators, making it unsuitable for things like pytest
-    # fixtures which require one run() call for setup, one for the actual test and one for
-    # teardown.
-    exception = retval = None
-    loop = asyncio.get_event_loop()
-    loop.set_debug(debug)
-    task = loop.create_task(wrapper())
-    task_state = TaskState(None, get_callable_name(func), None)
-    _task_states[task] = task_state
-    if _native_task_names:
-        task.set_name(task_state.name)
 
-    loop.run_until_complete(task)
-    if exception is not None:
-        raise exception
-    else:
-        return cast(T_Retval, retval)
+def run(func: Callable[..., T_Retval], *args, debug: bool = False, use_uvloop: bool = True,
+        policy: Optional[asyncio.AbstractEventLoopPolicy] = None) -> T_Retval:
+    @wraps(func)
+    async def wrapper():
+        task = current_task()
+        task_state = TaskState(None, get_callable_name(func), None)
+        _task_states[task] = task_state
+        if _native_task_names:
+            task.set_name(task_state.name)
+
+        try:
+            return await func(*args)
+        finally:
+            del _task_states[task]
+
+    _maybe_set_event_loop_policy(policy, use_uvloop)
+    return native_run(wrapper(), debug=debug)
 
 
 #
 # Miscellaneous
 #
 
-finalize = aclosing
-
-
 async def sleep(delay: float) -> None:
-    check_cancelled()
+    await checkpoint()
     await asyncio.sleep(delay)
 
 
@@ -135,19 +176,19 @@ async def sleep(delay: float) -> None:
 CancelledError = asyncio.CancelledError
 
 
-class CancelScope:
+class CancelScope(abc.CancelScope):
     __slots__ = ('_deadline', '_shield', '_parent_scope', '_cancel_called', '_active',
                  '_timeout_task', '_tasks', '_host_task', '_timeout_expired')
 
     def __init__(self, deadline: float = math.inf, shield: bool = False):
         self._deadline = deadline
         self._shield = shield
-        self._parent_scope = None
+        self._parent_scope: Optional[CancelScope] = None
         self._cancel_called = False
         self._active = False
-        self._timeout_task = None
-        self._tasks = set()  # type: Set[asyncio.Task]
-        self._host_task = None  # type: Optional[asyncio.Task]
+        self._timeout_task: Optional[asyncio.Task] = None
+        self._tasks: Set[asyncio.Task] = set()
+        self._host_task: Optional[asyncio.Task] = None
         self._timeout_expired = False
 
     async def __aenter__(self):
@@ -229,7 +270,7 @@ class CancelScope:
     def _shielded_to(self, parent: Optional['CancelScope']) -> bool:
         # Check whether this task or any parent up to (but not including) the "parent" argument is
         # shielded
-        cancel_scope = self  # type: Optional[CancelScope]
+        cancel_scope: Optional[CancelScope] = self
         while cancel_scope is not None and cancel_scope is not parent:
             if cancel_scope._shield:
                 return True
@@ -269,41 +310,38 @@ class CancelScope:
         return self._shield
 
 
-abc.CancelScope.register(CancelScope)
-
-
-def check_cancelled():
+async def checkpoint():
     try:
         cancel_scope = _task_states[current_task()].cancel_scope
     except KeyError:
-        return
+        cancel_scope = None
 
     while cancel_scope:
         if cancel_scope.cancel_called:
             raise CancelledError
         elif cancel_scope.shield:
-            return
+            break
         else:
             cancel_scope = cancel_scope._parent_scope
 
+    await asyncio.sleep(0)
+
 
 @asynccontextmanager
-@async_generator
 async def fail_after(delay: float, shield: bool):
     deadline = get_running_loop().time() + delay
     async with CancelScope(deadline, shield) as scope:
-        await yield_(scope)
+        yield scope
 
     if scope._timeout_expired:
         raise TimeoutError
 
 
 @asynccontextmanager
-@async_generator
 async def move_on_after(delay: float, shield: bool):
     deadline = get_running_loop().time() + delay
     async with CancelScope(deadline=deadline, shield=shield) as scope:
-        await yield_(scope)
+        yield scope
 
 
 async def current_effective_deadline():
@@ -355,13 +393,13 @@ class ExceptionGroup(BaseExceptionGroup):
         self.exceptions = exceptions
 
 
-class TaskGroup:
+class TaskGroup(abc.TaskGroup):
     __slots__ = 'cancel_scope', '_active', '_exceptions'
 
     def __init__(self):
-        self.cancel_scope = CancelScope()
+        self.cancel_scope: CancelScope = CancelScope()
         self._active = False
-        self._exceptions = []  # type: List[BaseException]
+        self._exceptions: List[BaseException] = []
 
     async def __aenter__(self):
         await self.cancel_scope.__aenter__()
@@ -378,7 +416,10 @@ class TaskGroup:
                 self._exceptions.append(exc_val)
 
         while self.cancel_scope._tasks:
-            await asyncio.wait(self.cancel_scope._tasks)
+            try:
+                await asyncio.wait(self.cancel_scope._tasks)
+            except asyncio.CancelledError:
+                await self.cancel_scope.cancel()
 
         self._active = False
         if not self.cancel_scope._parent_cancelled():
@@ -386,16 +427,22 @@ class TaskGroup:
         else:
             exceptions = self._exceptions
 
-        if len(exceptions) > 1:
-            raise ExceptionGroup(exceptions)
-        elif exceptions and exceptions[0] is not exc_val:
-            raise exceptions[0]
+        try:
+            if len(exceptions) > 1:
+                raise ExceptionGroup(exceptions)
+            elif exceptions and exceptions[0] is not exc_val:
+                raise exceptions[0]
+        except BaseException as exc:
+            # Clear the context here, as it can only be done in-flight.
+            # If the context is not cleared, it can result in recursive tracebacks (see #145).
+            exc.__context__ = None
+            raise
 
         return ignore_exception
 
     @staticmethod
     def _filter_cancellation_errors(exceptions: Sequence[BaseException]) -> List[BaseException]:
-        filtered_exceptions = []  # type: List[BaseException]
+        filtered_exceptions: List[BaseException] = []
         for exc in exceptions:
             if isinstance(exc, ExceptionGroup):
                 exc.exceptions = TaskGroup._filter_cancellation_errors(exc.exceptions)
@@ -410,7 +457,7 @@ class TaskGroup:
         return filtered_exceptions
 
     async def _run_wrapped_task(self, func: Callable[..., Coroutine], args: tuple) -> None:
-        task = current_task()
+        task = cast(asyncio.Task, current_task())
         try:
             await func(*args)
         except BaseException as exc:
@@ -436,9 +483,6 @@ class TaskGroup:
         self.cancel_scope._tasks.add(task)
 
 
-abc.TaskGroup.register(TaskGroup)
-
-
 #
 # Threads
 #
@@ -446,12 +490,13 @@ abc.TaskGroup.register(TaskGroup)
 _Retval_Queue_Type = Tuple[Optional[T_Retval], Optional[BaseException]]
 
 
-async def run_in_thread(func: Callable[..., T_Retval], *args, cancellable: bool = False,
-                        limiter: Optional['CapacityLimiter'] = None) -> T_Retval:
+async def run_sync_in_worker_thread(
+        func: Callable[..., T_Retval], *args, cancellable: bool = False,
+        limiter: Optional['CapacityLimiter'] = None) -> T_Retval:
     def thread_worker():
         try:
             with claim_worker_thread('asyncio'):
-                _local.loop = loop
+                threadlocals.loop = loop
                 result = func(*args)
         except BaseException as exc:
             if not loop.is_closed():
@@ -464,10 +509,10 @@ async def run_in_thread(func: Callable[..., T_Retval], *args, cancellable: bool 
                 if not cancelled:
                     loop.call_soon_threadsafe(queue.put_nowait, (result, None))
 
-    check_cancelled()
+    await checkpoint()
     loop = get_running_loop()
     task = current_task()
-    queue = asyncio.Queue(1)  # type: asyncio.Queue[_Retval_Queue_Type]
+    queue: asyncio.Queue[_Retval_Queue_Type] = asyncio.Queue(1)
     cancelled = False
     limiter = limiter or _default_thread_limiter
     await limiter.acquire_on_behalf_of(task)
@@ -486,115 +531,430 @@ async def run_in_thread(func: Callable[..., T_Retval], *args, cancellable: bool 
 
 
 def run_async_from_thread(func: Callable[..., Coroutine[Any, Any, T_Retval]], *args) -> T_Retval:
-    f = asyncio.run_coroutine_threadsafe(
-        func(*args), _local.loop)  # type: concurrent.futures.Future[T_Retval]
+    f: concurrent.futures.Future[T_Retval] = asyncio.run_coroutine_threadsafe(
+        func(*args), threadlocals.loop)
     return f.result()
 
 
+class BlockingPortal(abc.BlockingPortal):
+    __slots__ = '_loop'
+
+    def __init__(self):
+        super().__init__()
+        self._loop = get_running_loop()
+
+    def _spawn_task_from_thread(self, func: Callable, args: tuple, future: Future) -> None:
+        asyncio.run_coroutine_threadsafe(
+            self._task_group.spawn(self._call_func, func, args, future), self._loop)
+
+
 #
-# Async file I/O
+# Subprocesses
 #
 
-class AsyncFile:
-    def __init__(self, fp) -> None:
-        self._fp = fp
+@dataclass
+class StreamReaderWrapper(abc.ByteReceiveStream):
+    _stream: asyncio.StreamReader
 
-    def __getattr__(self, name):
-        return getattr(self._fp, name)
+    async def receive(self, max_bytes: int = 65536) -> bytes:
+        data = await self._stream.read(max_bytes)
+        if data:
+            return data
+        else:
+            raise EndOfStream
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type: Optional[Type[BaseException]],
-                        exc_val: Optional[BaseException],
-                        exc_tb: Optional[TracebackType]) -> None:
-        await self.close()
-
-    @async_generator
-    async def __aiter__(self):
-        while True:
-            line = await self.readline()
-            if line:
-                await yield_(line)
-            else:
-                break
-
-    async def read(self, size: int = -1) -> Union[bytes, str]:
-        return await run_in_thread(self._fp.read, size)
-
-    async def read1(self, size: int = -1) -> Union[bytes, str]:
-        return await run_in_thread(self._fp.read1, size)
-
-    async def readline(self) -> bytes:
-        return await run_in_thread(self._fp.readline)
-
-    async def readlines(self) -> bytes:
-        return await run_in_thread(self._fp.readlines)
-
-    async def readinto(self, b: Union[bytes, memoryview]) -> bytes:
-        return await run_in_thread(self._fp.readinto, b)
-
-    async def readinto1(self, b: Union[bytes, memoryview]) -> bytes:
-        return await run_in_thread(self._fp.readinto1, b)
-
-    async def write(self, b: bytes) -> None:
-        return await run_in_thread(self._fp.write, b)
-
-    async def writelines(self, lines: bytes) -> None:
-        return await run_in_thread(self._fp.writelines, lines)
-
-    async def truncate(self, size: Optional[int] = None) -> int:
-        return await run_in_thread(self._fp.truncate, size)
-
-    async def seek(self, offset: int, whence: Optional[int] = os.SEEK_SET) -> int:
-        return await run_in_thread(self._fp.seek, offset, whence)
-
-    async def tell(self) -> int:
-        return await run_in_thread(self._fp.tell)
-
-    async def flush(self) -> None:
-        return await run_in_thread(self._fp.flush)
-
-    async def close(self) -> None:
-        return await run_in_thread(self._fp.close)
+    async def aclose(self) -> None:
+        self._stream.feed_eof()
 
 
-async def aopen(*args, **kwargs):
-    fp = await run_in_thread(partial(open, *args, **kwargs))
-    return AsyncFile(fp)
+@dataclass
+class StreamWriterWrapper(abc.ByteSendStream):
+    _stream: asyncio.StreamWriter
+
+    async def send(self, item: bytes) -> None:
+        self._stream.write(item)
+        await self._stream.drain()
+
+    async def aclose(self) -> None:
+        self._stream.close()
+
+
+@dataclass
+class Process(abc.Process):
+    _process: asyncio.subprocess.Process
+    _stdin: Optional[abc.ByteSendStream]
+    _stdout: Optional[abc.ByteReceiveStream]
+    _stderr: Optional[abc.ByteReceiveStream]
+
+    async def aclose(self) -> None:
+        if self._stdin:
+            await self._stdin.aclose()
+        if self._stdout:
+            await self._stdout.aclose()
+        if self._stderr:
+            await self._stderr.aclose()
+
+        await self.wait()
+
+    async def wait(self) -> int:
+        return await self._process.wait()
+
+    def terminate(self) -> None:
+        self._process.terminate()
+
+    def kill(self) -> None:
+        self._process.kill()
+
+    def send_signal(self, signal: int) -> None:
+        self._process.send_signal(signal)
+
+    @property
+    def pid(self) -> int:
+        return self._process.pid
+
+    @property
+    def returncode(self) -> Optional[int]:
+        return self._process.returncode
+
+    @property
+    def stdin(self) -> Optional[abc.ByteSendStream]:
+        return self._stdin
+
+    @property
+    def stdout(self) -> Optional[abc.ByteReceiveStream]:
+        return self._stdout
+
+    @property
+    def stderr(self) -> Optional[abc.ByteReceiveStream]:
+        return self._stderr
+
+
+async def open_process(command, *, shell: bool, stdin: int, stdout: int, stderr: int):
+    await checkpoint()
+    if shell:
+        process = await asyncio.create_subprocess_shell(command, stdin=stdin, stdout=stdout,
+                                                        stderr=stderr)
+    else:
+        process = await asyncio.create_subprocess_exec(*command, stdin=stdin, stdout=stdout,
+                                                       stderr=stderr)
+
+    stdin_stream = StreamWriterWrapper(process.stdin) if process.stdin else None
+    stdout_stream = StreamReaderWrapper(process.stdout) if process.stdout else None
+    stderr_stream = StreamReaderWrapper(process.stderr) if process.stderr else None
+    return Process(process, stdin_stream, stdout_stream, stderr_stream)
 
 
 #
 # Sockets and networking
 #
 
-_read_events = {}  # type: Dict[socket.SocketType, asyncio.Event]
-_write_events = {}  # type: Dict[socket.SocketType, asyncio.Event]
+_read_events: Dict[socket.SocketType, asyncio.Event] = {}
+_write_events: Dict[socket.SocketType, asyncio.Event] = {}
 
 
-class Socket(BaseSocket):
-    __slots__ = '_loop', '_read_event', '_write_event'
+class StreamProtocol(asyncio.Protocol):
+    read_queue: Deque[bytes]
+    read_event: asyncio.Event
+    write_event: asyncio.Event
+    exception: Optional[Exception] = None
 
-    def __init__(self, raw_socket: socket.SocketType) -> None:
-        super().__init__(raw_socket)
-        self._loop = get_running_loop()
-        self._read_event = asyncio.Event()
-        self._write_event = asyncio.Event()
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        self.read_queue = deque()
+        self.read_event = asyncio.Event()
+        self.write_event = asyncio.Event()
+        self.write_event.set()
+        cast(asyncio.Transport, transport).set_write_buffer_limits(0)
 
-    def _wait_readable(self):
-        return wait_socket_readable(self._raw_socket)
+    def connection_lost(self, exc: Optional[Exception]) -> None:
+        self.exception = exc
+        self.read_event.set()
+        self.write_event.set()
 
-    def _wait_writable(self):
-        return wait_socket_writable(self._raw_socket)
+    def data_received(self, data: bytes) -> None:
+        self.read_queue.append(data)
+        self.read_event.set()
 
-    def _notify_close(self):
-        return notify_socket_close(self._raw_socket)
+    def eof_received(self) -> Optional[bool]:
+        self.read_event.set()
+        return None
 
-    def _check_cancelled(self):
-        return sleep(0)
+    def pause_writing(self) -> None:
+        self.write_event.clear()
 
-    def _run_in_thread(self, func: Callable, *args):
-        return run_in_thread(func, *args)
+    def resume_writing(self) -> None:
+        self.write_event.set()
+
+
+class DatagramProtocol(asyncio.DatagramProtocol):
+    read_queue: Deque[Tuple[bytes, IPSockAddrType]]
+    read_event: asyncio.Event
+    write_event: asyncio.Event
+    exception: Optional[Exception] = None
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        self.read_queue = deque(maxlen=100)  # arbitrary value
+        self.read_event = asyncio.Event()
+        self.write_event = asyncio.Event()
+        self.write_event.set()
+
+    def connection_lost(self, exc: Optional[Exception]) -> None:
+        self.read_event.set()
+        self.write_event.set()
+
+    def datagram_received(self, data: bytes, addr: IPSockAddrType) -> None:
+        addr = convert_ipv6_sockaddr(addr)
+        self.read_queue.append((data, addr))
+        self.read_event.set()
+
+    def error_received(self, exc: Exception) -> None:
+        self.exception = exc
+
+    def pause_writing(self) -> None:
+        self.write_event.clear()
+
+    def resume_writing(self) -> None:
+        self.write_event.set()
+
+
+class SocketStream(abc.SocketStream):
+    def __init__(self, transport: asyncio.Transport, protocol: StreamProtocol):
+        self._transport = transport
+        self._protocol = protocol
+        self._receive_guard = ResourceGuard('reading from')
+        self._send_guard = ResourceGuard('writing to')
+        self._closed = False
+
+    @property
+    def _raw_socket(self) -> socket.socket:
+        return self._transport.get_extra_info('socket')
+
+    async def receive(self, max_bytes: int = 65536) -> bytes:
+        with self._receive_guard:
+            await checkpoint()
+            if not self._protocol.read_queue and not self._transport.is_closing():
+                self._protocol.read_event.clear()
+                self._transport.resume_reading()
+                await self._protocol.read_event.wait()
+                self._transport.pause_reading()
+
+            try:
+                chunk = self._protocol.read_queue.popleft()
+            except IndexError:
+                if self._closed:
+                    raise ClosedResourceError from None
+                elif self._protocol.exception:
+                    raise BrokenResourceError from self._protocol.exception
+                else:
+                    raise EndOfStream
+
+            if len(chunk) > max_bytes:
+                # Split the oversized chunk
+                chunk, leftover = chunk[:max_bytes], chunk[max_bytes:]
+                self._protocol.read_queue.appendleft(leftover)
+
+        return chunk
+
+    async def send(self, item: bytes) -> None:
+        with self._send_guard:
+            await checkpoint()
+            try:
+                self._transport.write(item)
+            except RuntimeError as exc:
+                if self._closed:
+                    raise ClosedResourceError from None
+                elif self._transport.is_closing():
+                    raise BrokenResourceError from exc
+                else:
+                    raise
+
+            await self._protocol.write_event.wait()
+
+    async def send_eof(self) -> None:
+        try:
+            self._transport.write_eof()
+        except OSError:
+            pass
+
+    async def aclose(self) -> None:
+        if not self._transport.is_closing():
+            self._closed = True
+            try:
+                self._transport.write_eof()
+            except OSError:
+                pass
+
+            self._transport.close()
+            await asyncio.sleep(0)
+            self._transport.abort()
+
+
+class SocketListener(abc.SocketListener):
+    def __init__(self, raw_socket: socket.SocketType):
+        self.__raw_socket = raw_socket
+        self._loop = cast(asyncio.BaseEventLoop, get_running_loop())
+        self._accept_guard = ResourceGuard('accepting connections from')
+
+    @property
+    def _raw_socket(self) -> socket.socket:
+        return self.__raw_socket
+
+    async def accept(self) -> abc.SocketStream:
+        with self._accept_guard:
+            await checkpoint()
+            try:
+                client_sock, _addr = await self._loop.sock_accept(self._raw_socket)
+            except asyncio.CancelledError:
+                # Workaround for https://bugs.python.org/issue41317
+                try:
+                    self._loop.remove_reader(self._raw_socket)
+                except NotImplementedError:
+                    pass
+
+                raise
+
+        if client_sock.family in (socket.AF_INET, socket.AF_INET6):
+            client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+        transport, protocol = await self._loop.connect_accepted_socket(StreamProtocol, client_sock)
+        return SocketStream(cast(asyncio.Transport, transport), cast(StreamProtocol, protocol))
+
+    async def aclose(self) -> None:
+        self._raw_socket.close()
+
+
+class UDPSocket(abc.UDPSocket):
+    def __init__(self, transport: asyncio.DatagramTransport, protocol: DatagramProtocol):
+        self._transport = transport
+        self._protocol = protocol
+        self._receive_guard = ResourceGuard('reading from')
+        self._send_guard = ResourceGuard('writing to')
+        self._closed = False
+
+    @property
+    def _raw_socket(self) -> SocketType:
+        return self._transport.get_extra_info('socket')
+
+    async def aclose(self) -> None:
+        if not self._transport.is_closing():
+            self._closed = True
+            self._transport.close()
+
+    async def receive(self) -> Tuple[bytes, IPSockAddrType]:
+        with self._receive_guard:
+            await checkpoint()
+
+            # If the buffer is empty, ask for more data
+            if not self._protocol.read_queue and not self._transport.is_closing():
+                self._protocol.read_event.clear()
+                await self._protocol.read_event.wait()
+
+            try:
+                return self._protocol.read_queue.popleft()
+            except IndexError:
+                if self._closed:
+                    raise ClosedResourceError from None
+                else:
+                    raise BrokenResourceError from None
+
+    async def send(self, item: UDPPacketType) -> None:
+        with self._send_guard:
+            await checkpoint()
+            await self._protocol.write_event.wait()
+            if self._closed:
+                raise ClosedResourceError
+            elif self._transport.is_closing():
+                raise BrokenResourceError
+            else:
+                self._transport.sendto(*item)
+
+
+class ConnectedUDPSocket(abc.ConnectedUDPSocket):
+    def __init__(self, transport: asyncio.DatagramTransport, protocol: DatagramProtocol):
+        self._transport = transport
+        self._protocol = protocol
+        self._receive_guard = ResourceGuard('reading from')
+        self._send_guard = ResourceGuard('writing to')
+        self._closed = False
+
+    @property
+    def _raw_socket(self) -> SocketType:
+        return self._transport.get_extra_info('socket')
+
+    async def aclose(self) -> None:
+        if not self._transport.is_closing():
+            self._closed = True
+            self._transport.close()
+
+    async def receive(self) -> bytes:
+        with self._receive_guard:
+            await checkpoint()
+
+            # If the buffer is empty, ask for more data
+            if not self._protocol.read_queue and not self._transport.is_closing():
+                self._protocol.read_event.clear()
+                await self._protocol.read_event.wait()
+
+            try:
+                packet = self._protocol.read_queue.popleft()
+            except IndexError:
+                if self._closed:
+                    raise ClosedResourceError from None
+                else:
+                    raise BrokenResourceError from None
+
+            return packet[0]
+
+    async def send(self, item: bytes) -> None:
+        with self._send_guard:
+            await checkpoint()
+            await self._protocol.write_event.wait()
+            if self._closed:
+                raise ClosedResourceError
+            elif self._transport.is_closing():
+                raise BrokenResourceError
+            else:
+                self._transport.sendto(item)
+
+
+async def connect_tcp(host: str, port: int,
+                      local_addr: Optional[Tuple[str, int]] = None) -> SocketStream:
+    transport, protocol = cast(
+        Tuple[asyncio.Transport, StreamProtocol],
+        await get_running_loop().create_connection(StreamProtocol, host, port,
+                                                   local_addr=local_addr)
+    )
+    transport.pause_reading()
+    return SocketStream(transport, protocol)
+
+
+async def connect_unix(path: str) -> SocketStream:
+    transport, protocol = cast(
+        Tuple[asyncio.Transport, StreamProtocol],
+        await get_running_loop().create_unix_connection(StreamProtocol, path)
+    )
+    transport.pause_reading()
+    return SocketStream(transport, protocol)
+
+
+async def create_udp_socket(
+    family: socket.AddressFamily,
+    local_address: Optional[IPSockAddrType],
+    remote_address: Optional[IPSockAddrType],
+    reuse_port: bool
+) -> Union[UDPSocket, ConnectedUDPSocket]:
+    result = await get_running_loop().create_datagram_endpoint(
+        DatagramProtocol, local_addr=local_address, remote_addr=remote_address, family=family,
+        reuse_port=reuse_port)
+    transport = cast(asyncio.DatagramTransport, result[0])
+    protocol = cast(DatagramProtocol, result[1])
+    if protocol.exception:
+        transport.close()
+        raise protocol.exception
+
+    if not remote_address:
+        return UDPSocket(transport, protocol)
+    else:
+        return ConnectedUDPSocket(transport, protocol)
 
 
 async def getaddrinfo(host: Union[bytearray, bytes, str], port: Union[str, int, None], *,
@@ -606,16 +966,16 @@ async def getaddrinfo(host: Union[bytearray, bytes, str], port: Union[str, int, 
     return cast(GetAddrInfoReturnType, result)
 
 
-async def getnameinfo(sockaddr: SockaddrType, flags: int = 0) -> Tuple[str, str]:
+async def getnameinfo(sockaddr: IPSockAddrType, flags: int = 0) -> Tuple[str, str]:
     # https://github.com/python/typeshed/pull/4305
     result = await get_running_loop().getnameinfo(sockaddr, flags)
     return cast(Tuple[str, str], result)
 
 
 async def wait_socket_readable(sock: socket.SocketType) -> None:
-    check_cancelled()
+    await checkpoint()
     if _read_events.get(sock):
-        raise ResourceBusyError('reading from') from None
+        raise BusyResourceError('reading from') from None
 
     loop = get_running_loop()
     event = _read_events[sock] = asyncio.Event()
@@ -634,9 +994,9 @@ async def wait_socket_readable(sock: socket.SocketType) -> None:
 
 
 async def wait_socket_writable(sock: socket.SocketType) -> None:
-    check_cancelled()
+    await checkpoint()
     if _write_events.get(sock):
-        raise ResourceBusyError('writing to') from None
+        raise BusyResourceError('writing to') from None
 
     loop = get_running_loop()
     event = _write_events[sock] = asyncio.Event()
@@ -654,92 +1014,87 @@ async def wait_socket_writable(sock: socket.SocketType) -> None:
         raise ClosedResourceError
 
 
-async def notify_socket_close(sock: socket.SocketType) -> None:
-    loop = get_running_loop()
-
-    event = _read_events.pop(sock, None)
-    if event is not None:
-        loop.remove_reader(sock)
-        event.set()
-
-    event = _write_events.pop(sock, None)
-    if event is not None:
-        loop.remove_writer(sock)
-        event.set()
-
-
 #
 # Synchronization
 #
 
-class Lock(asyncio.Lock):
-    async def __aenter__(self):
-        check_cancelled()
-        await self.acquire()
+class Lock(abc.Lock):
+    def __init__(self):
+        self._lock = asyncio.Lock()
 
-    async def __aexit__(self, exc_type: Optional[Type[BaseException]],
-                        exc_val: Optional[BaseException],
-                        exc_tb: Optional[TracebackType]) -> None:
-        self.release()
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    async def acquire(self) -> None:
+        await checkpoint()
+        await self._lock.acquire()
+
+    async def release(self) -> None:
+        self._lock.release()
 
 
-class Condition(asyncio.Condition):
-    async def __aenter__(self):
-        check_cancelled()
-        return await super().__aenter__()
+class Condition(abc.Condition):
+    def __init__(self, lock: Optional[Lock]):
+        asyncio_lock = lock._lock if lock else None
+        self._condition = asyncio.Condition(asyncio_lock)
+
+    async def acquire(self) -> None:
+        await checkpoint()
+        await self._condition.acquire()
+
+    async def release(self) -> None:
+        self._condition.release()
+
+    def locked(self) -> bool:
+        return self._condition.locked()
 
     async def notify(self, n=1):
-        super().notify(n)
+        self._condition.notify(n)
 
     async def notify_all(self):
-        super().notify(len(self._waiters))
+        self._condition.notify_all()
 
     async def wait(self):
-        check_cancelled()
-        return await super().wait()
+        await checkpoint()
+        return await self._condition.wait()
 
 
-class Event(asyncio.Event):
+class Event(abc.Event):
+    def __init__(self):
+        self._event = asyncio.Event()
+
     async def set(self):
-        super().set()
+        self._event.set()
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
 
     async def wait(self):
-        check_cancelled()
-        return await super().wait()
+        await checkpoint()
+        await self._event.wait()
 
 
-class Semaphore(asyncio.Semaphore):
-    async def __aenter__(self):
-        check_cancelled()
-        return await super().__aenter__()
+class Semaphore(abc.Semaphore):
+    def __init__(self, value: int):
+        self._semaphore = asyncio.Semaphore(value)
+
+    async def acquire(self) -> None:
+        await checkpoint()
+        await self._semaphore.acquire()
+
+    async def release(self) -> None:
+        self._semaphore.release()
 
     @property
     def value(self):
-        return self._value
+        return self._semaphore._value
 
 
-class Queue(asyncio.Queue):
-    async def get(self):
-        check_cancelled()
-        return await super().get()
-
-    async def put(self, item):
-        check_cancelled()
-        return await super().put(item)
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        check_cancelled()
-        return await super().get()
-
-
-class CapacityLimiter:
+class CapacityLimiter(abc.CapacityLimiter):
     def __init__(self, total_tokens: float):
         self._set_total_tokens(total_tokens)
-        self._borrowers = set()  # type: Set[Any]
-        self._wait_queue = OrderedDict()  # type: Dict[Any, asyncio.Event]
+        self._borrowers: Set[Any] = set()
+        self._wait_queue: Dict[Any, asyncio.Event] = OrderedDict()
 
     async def __aenter__(self):
         await self.acquire()
@@ -836,26 +1191,17 @@ def current_default_thread_limiter():
 
 _default_thread_limiter = CapacityLimiter(40)
 
-abc.Lock.register(Lock)
-abc.Condition.register(Condition)
-abc.Event.register(Event)
-abc.Semaphore.register(Semaphore)
-abc.Queue.register(Queue)
-abc.CapacityLimiter.register(CapacityLimiter)
-
 
 #
 # Operating system signals
 #
 
 @asynccontextmanager
-@async_generator
-async def receive_signals(*signals: int):
-    @async_generator
+async def open_signal_receiver(*signals: int):
     async def process_signal_queue():
         while True:
             signum = await queue.get()
-            await yield_(signum)
+            yield signum
 
     loop = get_running_loop()
     queue = asyncio.Queue()  # type: asyncio.Queue[int]
@@ -866,7 +1212,7 @@ async def receive_signals(*signals: int):
             loop.add_signal_handler(sig, queue.put_nowait, sig)
             handled_signals.add(sig)
 
-        await yield_(agen)
+        yield agen
     finally:
         await agen.aclose()
         for sig in handled_signals:
@@ -901,24 +1247,71 @@ async def wait_all_tasks_blocked() -> None:
     this_task = current_task()
     while True:
         for task in all_tasks():
-            if task is not this_task:
-                try:
-                    awaitable = task._coro.cr_await  # type: ignore
-                except AttributeError:
-                    awaitable = task._coro.gi_yieldfrom  # type: ignore
+            if task is this_task:
+                continue
 
-                # Consider any task doing sleep(0) as not being blocked
-                while asyncio.iscoroutine(awaitable) and hasattr(awaitable, 'cr_code'):
-                    if (awaitable.cr_code is sleep.__code__
-                            and awaitable.cr_frame.f_locals['delay'] == 0):
-                        awaitable = None
-                    elif awaitable.cr_await:
-                        awaitable = awaitable.cr_await
-                    else:
-                        break
+            if isgenerator(task._coro):  # type: ignore
+                awaitable = task._coro.gi_yieldfrom  # type: ignore
+            else:
+                awaitable = task._coro.cr_await  # type: ignore
 
-                if awaitable is None:
-                    await sleep(0)
+            # If the first awaitable is None, the task has not started running yet
+            task_running = bool(awaitable)
+
+            # Consider any task doing sleep(0) as not being blocked
+            while asyncio.iscoroutine(awaitable):
+                if isgenerator(awaitable):
+                    code = awaitable.gi_code
+                    f_locals = awaitable.gi_frame.f_locals
+                    awaitable = awaitable.gi_yieldfrom
+                else:
+                    code = awaitable.cr_code
+                    f_locals = awaitable.cr_frame.f_locals
+                    awaitable = awaitable.cr_await
+
+                if code is asyncio.sleep.__code__ and f_locals['delay'] == 0:
+                    task_running = False
                     break
+
+            if not task_running:
+                await sleep(0.1)
+                break
         else:
             return
+
+
+class TestRunner(abc.TestRunner):
+    def __init__(self, debug: bool = False, use_uvloop: bool = True,
+                 policy: Optional[asyncio.AbstractEventLoopPolicy] = None):
+        _maybe_set_event_loop_policy(policy, use_uvloop)
+        self._loop = asyncio.new_event_loop()
+        self._loop.set_debug(debug)
+        asyncio.set_event_loop(self._loop)
+
+    def _cancel_all_tasks(self):
+        to_cancel = all_tasks(self._loop)
+        if not to_cancel:
+            return
+
+        for task in to_cancel:
+            task.cancel()
+
+        self._loop.run_until_complete(
+            asyncio.gather(*to_cancel, loop=self._loop, return_exceptions=True))
+
+        for task in to_cancel:
+            if task.cancelled():
+                continue
+            if task.exception() is not None:
+                raise task.exception()
+
+    def close(self) -> None:
+        try:
+            self._cancel_all_tasks()
+            self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+        finally:
+            asyncio.set_event_loop(None)
+            self._loop.close()
+
+    def call(self, func: Callable[..., Awaitable], *args, **kwargs):
+        return self._loop.run_until_complete(func(*args, **kwargs))
