@@ -2,21 +2,11 @@ name: Python codeqa/test
 
 on:
   push:
-    branches:
-      - master
+    branches: [master]
   pull_request:
 
 jobs:
-  flake8:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v2
-    - name: Check code style with Flake8
-      uses: TrueBrain/actions-flake8@master
-      with:
-        path: src tests
-
-  mypy:
+  lint:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2
@@ -24,21 +14,31 @@ jobs:
       uses: actions/setup-python@v2
       with:
         python-version: 3.x
+    - uses: actions/cache@v2
+      with:
+        path: ~/.cache/pip
+        key: pip-lint
     - name: Install dependencies
-      run: pip install mypy
+      run: pip install flake8 isort mypy
+    - name: Run flake8
+      run: flake8 src tests
     - name: Check types with Mypy
       run: mypy src
+    - name: Run isort
+      run: isort -c src tests
 
   test:
-    needs: [flake8, mypy]
+    needs: [lint]
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: [3.5, 3.6, 3.7, 3.8, pypy3]
+        python-version: [3.6, 3.7, 3.8, pypy3]
         exclude:
         - os: macos-latest
           python-version: 3.7
+        - os: macos-latest
+          python-version: pypy3
         - os: windows-latest
           python-version: 3.7
         - os: windows-latest
@@ -50,7 +50,30 @@ jobs:
       uses: actions/setup-python@v2
       with:
         python-version: ${{ matrix.python-version }}
+    - uses: actions/cache@v2
+      with:
+        path: ~/.cache/pip
+        key: pip-test-${{ matrix.python-version }}-${{ matrix.os }}
     - name: Install dependencies
-      run: pip install .[test,curio,trio]
+      run: pip install .[test,curio,trio] coveralls
     - name: Test with pytest
       run: coverage run -m pytest
+    - name: Upload Coverage
+      run: coveralls
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        COVERALLS_FLAG_NAME: ${{ matrix.test-name }}
+        COVERALLS_PARALLEL: true
+
+  coveralls:
+    name: Finish Coveralls
+    needs: test
+    runs-on: ubuntu-latest
+    container: python:3-slim
+    steps:
+    - name: Finished
+      run: |
+        pip install coveralls
+        coveralls --finish
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
