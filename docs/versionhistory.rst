@@ -3,6 +3,21 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
+**2.0.2**
+
+- Fixed one more case of
+  ``AttributeError: 'async_generator_asend' object has no attribute 'cr_await'`` on asyncio
+
+**2.0.1**
+
+- Fixed broken ``MultiListener.extra()`` (PR by daa)
+- Fixed ``TLSStream`` returning an empty bytes object instead of raising ``EndOfStream`` when
+  trying to receive from the stream after a closing handshake
+- Fixed ``AttributeError`` when cancelling a task group's scope inside an async test fixture on
+  asyncio
+- Fixed ``wait_all_tasks_blocked()`` raising ``AttributeError`` on asyncio if a native task is
+  waiting on an async generator's ``asend()`` method
+
 **2.0.0**
 
 - General new features:
