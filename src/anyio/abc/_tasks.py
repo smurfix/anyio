@@ -16,25 +16,13 @@ class TaskGroup(metaclass=ABCMeta):
     cancel_scope: 'CancelScope'
 
     @abstractmethod
-    def spawn(self, func: Callable[..., Coroutine], *args, name=None) -> None:
+    async def spawn(self, func: Callable[..., Coroutine], *args, name=None) -> None:
         """
         Launch a new task in this task group.
 
         :param func: a coroutine function
         :param args: positional arguments to call the function with
         :param name: name of the task, for the purposes of introspection and debugging
-        """
-
-    @abstractmethod
-    async def start(self, func: Callable[..., Coroutine], *args, name=None) -> None:
-        """
-        Launch a new task and wait until it signals for readiness.
-
-        :param func: a coroutine function
-        :param args: positional arguments to call the function with
-        :param name: name of the task, for the purposes of introspection and debugging
-        :return: the value passed to ``task_status.started()``
-        :raises RuntimeError: if the task finishes without calling ``task_status.started()``
         """
 
     @abstractmethod
@@ -50,7 +38,7 @@ class TaskGroup(metaclass=ABCMeta):
 
 class CancelScope(metaclass=ABCMeta):
     @abstractmethod
-    def cancel(self) -> None:
+    async def cancel(self) -> None:
         """Cancel this scope immediately."""
 
     @property
@@ -77,11 +65,11 @@ class CancelScope(metaclass=ABCMeta):
         """
 
     @abstractmethod
-    def __enter__(self):
+    async def __aenter__(self):
         pass
 
     @abstractmethod
-    def __exit__(self, exc_type: Optional[Type[BaseException]],
-                 exc_val: Optional[BaseException],
-                 exc_tb: Optional[TracebackType]) -> Optional[bool]:
+    async def __aexit__(self, exc_type: Optional[Type[BaseException]],
+                        exc_val: Optional[BaseException],
+                        exc_tb: Optional[TracebackType]) -> Optional[bool]:
         pass

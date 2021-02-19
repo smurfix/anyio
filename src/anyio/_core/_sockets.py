@@ -129,11 +129,11 @@ async def connect_tcp(
         else:
             if connected_stream is None:
                 connected_stream = stream
-                tg.cancel_scope.cancel()
+                await tg.cancel_scope.cancel()
             else:
                 await stream.aclose()
         finally:
-            event.set()
+            await event.set()
 
     asynclib = get_asynclib()
     local_address: Optional[IPSockAddrType] = None
@@ -173,8 +173,8 @@ async def connect_tcp(
     async with create_task_group() as tg:
         for i, (af, addr) in enumerate(target_addrs):
             event = create_event()
-            tg.spawn(try_connect, addr, event)
-            with move_on_after(happy_eyeballs_delay):
+            await tg.spawn(try_connect, addr, event)
+            async with move_on_after(happy_eyeballs_delay):
                 await event.wait()
 
     if connected_stream is None:

@@ -30,7 +30,7 @@ class MemoryObjectReceiveStream(Generic[T_Item], ObjectReceiveStream[T_Item]):
     def __post_init__(self):
         self._state.open_receive_channels += 1
 
-    def receive_nowait(self) -> T_Item:
+    async def receive_nowait(self) -> T_Item:
         """
         Receive the next item if it can be done without waiting.
 
@@ -49,7 +49,7 @@ class MemoryObjectReceiveStream(Generic[T_Item], ObjectReceiveStream[T_Item]):
             # Get the item from the next sender
             send_event, item = self._state.waiting_senders.popitem(last=False)
             self._state.buffer.append(item)
-            send_event.set()
+            await send_event.set()
 
         if self._state.buffer:
             return self._state.buffer.popleft()
@@ -61,7 +61,7 @@ class MemoryObjectReceiveStream(Generic[T_Item], ObjectReceiveStream[T_Item]):
     async def receive(self) -> T_Item:
         await checkpoint()
         try:
-            return self.receive_nowait()
+            return await self.receive_nowait()
         except WouldBlock:
             # Add ourselves in the queue
             receive_event = create_event()
@@ -105,7 +105,7 @@ class MemoryObjectReceiveStream(Generic[T_Item], ObjectReceiveStream[T_Item]):
             if self._state.open_receive_channels == 0:
                 send_events = list(self._state.waiting_senders.keys())
                 for event in send_events:
-                    event.set()
+                    await event.set()
 
 
 @dataclass
@@ -116,7 +116,7 @@ class MemoryObjectSendStream(Generic[T_Item], ObjectSendStream[T_Item]):
     def __post_init__(self):
         self._state.open_send_channels += 1
 
-    def send_nowait(self, item: T_Item) -> None:
+    async def send_nowait(self, item: T_Item) -> None:
         """
         Send an item immediately if it can be done without waiting.
 
@@ -136,7 +136,7 @@ class MemoryObjectSendStream(Generic[T_Item], ObjectSendStream[T_Item]):
         if self._state.waiting_receivers:
             receive_event, container = self._state.waiting_receivers.popitem(last=False)
             container.append(item)
-            receive_event.set()
+            await receive_event.set()
         elif len(self._state.buffer) < self._state.max_buffer_size:
             self._state.buffer.append(item)
         else:
@@ -145,7 +145,7 @@ class MemoryObjectSendStream(Generic[T_Item], ObjectSendStream[T_Item]):
     async def send(self, item: T_Item) -> None:
         await checkpoint()
         try:
-            self.send_nowait(item)
+            await self.send_nowait(item)
         except WouldBlock:
             # Wait until there's someone on the receiving end
             send_event = create_event()
@@ -182,4 +182,4 @@ class MemoryObjectSendStream(Generic[T_Item], ObjectSendStream[T_Item]):
                 receive_events = list(self._state.waiting_receivers.keys())
                 self._state.waiting_receivers.clear()
                 for event in receive_events:
-                    event.set()
+                    await event.set()

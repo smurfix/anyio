@@ -11,6 +11,6 @@ async def aclose_forcefully(resource: AsyncResource) -> None:
     :param resource: the resource to close
 
     """
-    with open_cancel_scope() as scope:
-        scope.cancel()
+    async with open_cancel_scope() as scope:
+        await scope.cancel()
         await resource.aclose()

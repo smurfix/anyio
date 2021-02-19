@@ -1,9 +1,10 @@
 import socket
-from concurrent.futures import Future
+import sys
+from concurrent.futures import Future, CancelledError
 from dataclasses import dataclass
 from types import TracebackType
 from typing import (
-    Awaitable, Callable, Coroutine, Generic, List, NoReturn, Optional, Tuple, Type, TypeVar, Union)
+    Awaitable, Callable, Generic, List, NoReturn, Optional, Tuple, Type, TypeVar, Union)
 
 import trio.from_thread
 from outcome import Error, Value
@@ -14,6 +15,7 @@ from .._core._eventloop import claim_worker_thread
 from .._core._exceptions import (
     BrokenResourceError, BusyResourceError, ClosedResourceError, EndOfStream)
 from .._core._exceptions import ExceptionGroup as BaseExceptionGroup
+from .._core._exceptions import WouldBlock
 from .._core._sockets import convert_ipv6_sockaddr
 from .._core._synchronization import ResourceGuard
 from ..abc import IPSockAddrType, UDPPacketType
@@ -25,6 +27,11 @@ except ImportError:
     from trio.hazmat import wait_readable, wait_writable
 else:
     from trio.lowlevel import wait_readable, wait_writable
+
+if sys.version_info >= (3, 7):
+    from contextlib import asynccontextmanager
+else:
+    from async_generator import asynccontextmanager
 
 T_Retval = TypeVar('T_Retval')
 T_SockAddr = TypeVar('T_SockAddr', str, IPSockAddrType)
@@ -48,13 +55,69 @@ sleep = trio.sleep
 # Timeouts and cancellation
 #
 
-abc.CancelScope.register(trio.CancelScope)
-
 CancelledError = trio.Cancelled
 checkpoint = trio.lowlevel.checkpoint
-CancelScope = trio.CancelScope
-current_effective_deadline = trio.current_effective_deadline
-current_time = trio.current_time
+
+
+class CancelScope(abc.CancelScope):
+    __slots__ = '__original'
+
+    def __init__(self, original: Optional[trio.CancelScope] = None, **kwargs):
+        self.__original = original or trio.CancelScope(**kwargs)
+
+    async def __aenter__(self):
+        if self.__original._has_been_entered:
+            raise RuntimeError(
+                "Each CancelScope may only be used for a single 'async with' block"
+            )
+
+        self.__original.__enter__()
+        return self
+
+    async def __aexit__(self, exc_type: Optional[Type[BaseException]],
+                        exc_val: Optional[BaseException],
+                        exc_tb: Optional[TracebackType]) -> Optional[bool]:
+        return self.__original.__exit__(exc_type, exc_val, exc_tb)
+
+    async def cancel(self) -> None:
+        self.__original.cancel()
+
+    @property
+    def deadline(self) -> float:
+        return self.__original.deadline
+
+    @property
+    def cancel_called(self) -> bool:
+        return self.__original.cancel_called
+
+    @property
+    def shield(self) -> bool:
+        return self.__original.shield
+
+
+@asynccontextmanager
+async def move_on_after(seconds, shield):
+    with trio.move_on_after(seconds) as scope:
+        scope.shield = shield
+        yield CancelScope(scope)
+
+
+@asynccontextmanager
+async def fail_after(seconds, shield):
+    try:
+        with trio.fail_after(seconds) as cancel_scope:
+            cancel_scope.shield = shield
+            yield CancelScope(cancel_scope)
+    except trio.TooSlowError as exc:
+        raise TimeoutError().with_traceback(exc.__traceback__) from None
+
+
+async def current_effective_deadline():
+    return trio.current_effective_deadline()
+
+
+async def current_time():
+    return trio.current_time()
 
 
 #
@@ -65,8 +128,10 @@ class ExceptionGroup(BaseExceptionGroup, trio.MultiError):
     pass
 
 
-class TaskGroup(abc.TaskGroup):
-    def __init__(self):
+class TaskGroup:
+    __slots__ = '_active', '_nursery_manager', '_nursery', 'cancel_scope'
+
+    def __init__(self) -> None:
         self._active = False
         self._nursery_manager = trio.open_nursery()
         self.cancel_scope = None
@@ -74,7 +139,7 @@ class TaskGroup(abc.TaskGroup):
     async def __aenter__(self):
         self._active = True
         self._nursery = await self._nursery_manager.__aenter__()
-        self.cancel_scope = self._nursery.cancel_scope
+        self.cancel_scope = CancelScope(self._nursery.cancel_scope)
         return self
 
     async def __aexit__(self, exc_type: Optional[Type[BaseException]],
@@ -87,44 +152,44 @@ class TaskGroup(abc.TaskGroup):
         finally:
             self._active = False
 
-    def spawn(self, func: Callable, *args, name=None) -> None:
+    async def spawn(self, func: Callable, *args, name=None) -> None:
         if not self._active:
             raise RuntimeError('This task group is not active; no new tasks can be spawned.')
 
         self._nursery.start_soon(func, *args, name=name)
 
-    async def start(self, func: Callable[..., Coroutine], *args, name=None):
-        if not self._active:
-            raise RuntimeError('This task group is not active; no new tasks can be spawned.')
 
-        return await self._nursery.start(func, *args, name=name)
+abc.TaskGroup.register(TaskGroup)
+
 
 #
 # Threads
 #
 
-
 async def run_sync_in_worker_thread(
         func: Callable[..., T_Retval], *args, cancellable: bool = False,
-        limiter: Optional[trio.CapacityLimiter] = None) -> T_Retval:
+        limiter: Optional['CapacityLimiter'] = None) -> T_Retval:
     def wrapper():
         with claim_worker_thread('trio'):
             return func(*args)
 
-    return await run_sync(wrapper, cancellable=cancellable, limiter=limiter)
+    trio_limiter = getattr(limiter, '_limiter', None)
+    return await run_sync(wrapper, cancellable=cancellable, limiter=trio_limiter)
 
 run_async_from_thread = trio.from_thread.run
 run_sync_from_thread = trio.from_thread.run_sync
 
 
 class BlockingPortal(abc.BlockingPortal):
+    __slots__ = '_token'
+
     def __init__(self):
         super().__init__()
         self._token = trio.lowlevel.current_trio_token()
 
     def _spawn_task_from_thread(self, func: Callable, args: tuple, future: Future) -> None:
-        return trio.from_thread.run_sync(
-            self._task_group.spawn, self._call_func, func, args, future, trio_token=self._token)
+        return trio.from_thread.run(self._task_group.spawn, self._call_func, func, args, future,
+                                    trio_token=self._token)
 
 
 #
@@ -420,35 +485,146 @@ async def wait_socket_writable(sock):
 # Synchronization
 #
 
-abc.Lock.register(trio.Lock)
-abc.Event.register(trio.Event)
-abc.Condition.register(trio.Condition)
-abc.Semaphore.register(trio.Semaphore)
-abc.CapacityLimiter.register(trio.CapacityLimiter)
+class Lock(abc.Lock):
+    def __init__(self):
+        self._lock = trio.Lock()
 
-Lock = trio.Lock
-Event = trio.Event
-Condition = trio.Condition
-Semaphore = trio.Semaphore
-CapacityLimiter = trio.CapacityLimiter
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    async def acquire(self) -> None:
+        await trio.lowlevel.checkpoint()
+        await self._lock.acquire()
+
+    async def release(self) -> None:
+        self._lock.release()
+
+
+class Event(abc.Event):
+    def __init__(self):
+        self._event = trio.Event()
+
+    async def set(self) -> None:
+        self._event.set()
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
+
+    async def wait(self):
+        await self._event.wait()
+
+
+class Condition(abc.Condition):
+    def __init__(self, lock: Optional[trio.Lock] = None):
+        self._cond = trio.Condition(lock=lock)
+
+    async def acquire(self) -> None:
+        return await self._cond.acquire()
+
+    async def release(self) -> None:
+        self._cond.release()
+
+    def locked(self):
+        return self._cond.locked()
+
+    async def notify(self, n: int = 1) -> None:
+        self._cond.notify(n)
+
+    async def notify_all(self) -> None:
+        self._cond.notify_all()
+
+    async def wait(self):
+        return await self._cond.wait()
+
+
+class Semaphore(abc.Semaphore):
+    def __init__(self, value: int):
+        self._semaphore = trio.Semaphore(value)
+
+    async def acquire(self) -> None:
+        await self._semaphore.acquire()
+
+    async def release(self) -> None:
+        self._semaphore.release()
+
+    @property
+    def value(self) -> int:
+        return self._semaphore.value
+
+
+class CapacityLimiter(abc.CapacityLimiter):
+    def __init__(self, limiter_or_tokens: Union[float, trio.CapacityLimiter]):
+        if isinstance(limiter_or_tokens, trio.CapacityLimiter):
+            self._limiter = limiter_or_tokens
+        else:
+            self._limiter = trio.CapacityLimiter(limiter_or_tokens)
+
+    async def __aenter__(self) -> 'CapacityLimiter':
+        await self._limiter.__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type: Optional[Type[BaseException]],
+                        exc_val: Optional[BaseException],
+                        exc_tb: Optional[TracebackType]) -> None:
+        await self._limiter.__aexit__(exc_type, exc_val, exc_tb)
+
+    @property
+    def total_tokens(self) -> float:
+        return self._limiter.total_tokens
+
+    async def set_total_tokens(self, value: float) -> None:
+        self._limiter.total_tokens = value
+
+    @property
+    def borrowed_tokens(self) -> int:
+        return self._limiter.borrowed_tokens
+
+    @property
+    def available_tokens(self) -> float:
+        return self._limiter.available_tokens
+
+    async def acquire_nowait(self):
+        return self.acquire_nowait()
+
+    async def acquire_on_behalf_of_nowait(self, borrower):
+        try:
+            return self._limiter.acquire_on_behalf_of_nowait(borrower)
+        except trio.WouldBlock as exc:
+            raise WouldBlock from exc
+
+    def acquire(self):
+        return self._limiter.acquire()
+
+    def acquire_on_behalf_of(self, borrower):
+        return self._limiter.acquire_on_behalf_of(borrower)
+
+    async def release(self):
+        self._limiter.release()
+
+    async def release_on_behalf_of(self, borrower):
+        self._limiter.release_on_behalf_of(borrower)
 
 
 def current_default_thread_limiter():
-    return trio.to_thread.current_default_thread_limiter()
+    native_limiter = trio.to_thread.current_default_thread_limiter()
+    return CapacityLimiter(native_limiter)
 
 
 #
 # Signal handling
 #
 
-open_signal_receiver = trio.open_signal_receiver
+@asynccontextmanager
+async def open_signal_receiver(*signals: int):
+    with trio.open_signal_receiver(*signals) as cm:
+        yield cm
 
 
 #
 # Testing and debugging
 #
 
-def get_current_task() -> TaskInfo:
+async def get_current_task() -> TaskInfo:
     task = trio_lowlevel.current_task()
 
     parent_id = None
@@ -458,7 +634,7 @@ def get_current_task() -> TaskInfo:
     return TaskInfo(id(task), parent_id, task.name, task.coro)
 
 
-def get_running_tasks() -> List[TaskInfo]:
+async def get_running_tasks() -> List[TaskInfo]:
     root_task = trio_lowlevel.current_root_task()
     task_infos = [TaskInfo(id(root_task), None, root_task.name, root_task.coro)]
     nurseries = root_task.child_nurseries
@@ -502,7 +678,7 @@ class TestRunner(abc.TestRunner):
         except Exception as exc:
             self._result_queue.append(Error(exc))
         except BaseException as exc:
-            self._result_queue.append(Error(exc))
+            self._result_queue.append(Error(CancelledError()))
             raise
         else:
             self._result_queue.append(Value(retval))

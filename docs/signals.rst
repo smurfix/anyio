@@ -16,7 +16,7 @@ AnyIO provides a simple mechanism for you to receive the signals you're interest
 
 
     async def main():
-        with open_signal_receiver(signal.SIGTERM, signal.SIGHUP) as signals:
+        async with open_signal_receiver(signal.SIGTERM, signal.SIGHUP) as signals:
             async for signum in signals:
                 if signum == signal.SIGTERM:
                     return
@@ -47,20 +47,20 @@ signal handler::
 
 
     async def signal_handler(scope: CancelScope):
-        with open_signal_receiver(signal.SIGINT, signal.SIGTERM) as signals:
+        async with open_signal_receiver(signal.SIGINT, signal.SIGTERM) as signals:
             async for signum in signals:
                 if signum == signal.SIGINT:
                     print('Ctrl+C pressed!')
                 else:
                     print('Terminated!')
 
-                scope.cancel()
+                await scope.cancel()
                 return
 
 
     async def main():
         async with create_task_group() as tg:
-            tg.spawn(signal_handler, tg.cancel_scope)
+            await tg.spawn(signal_handler, tg.cancel_scope)
             ...  # proceed with starting the actual application logic
 
     run(main)

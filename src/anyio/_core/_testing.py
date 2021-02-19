@@ -35,24 +35,24 @@ class TaskInfo:
         return f'{self.__class__.__name__}(id={self.id!r}, name={self.name!r})'
 
 
-def get_current_task() -> TaskInfo:
+async def get_current_task() -> TaskInfo:
     """
     Return the current task.
 
     :return: a representation of the current task
 
     """
-    return get_asynclib().get_current_task()
+    return await get_asynclib().get_current_task()
 
 
-def get_running_tasks() -> List[TaskInfo]:
+async def get_running_tasks() -> List[TaskInfo]:
     """
     Return a list of running tasks in the current event loop.
 
     :return: a list of task info objects
 
     """
-    return get_asynclib().get_running_tasks()
+    return await get_asynclib().get_running_tasks()
 
 
 async def wait_all_tasks_blocked() -> None:
