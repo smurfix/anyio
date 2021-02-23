@@ -1,5 +1,5 @@
 import socket
-from concurrent.futures import Future
+from concurrent.futures import Future, CancelledError as ConcurrentCancel
 from dataclasses import dataclass
 from types import TracebackType
 from typing import (
@@ -499,10 +499,10 @@ class TestRunner(abc.TestRunner):
     async def _call_func(self, func, args, kwargs):
         try:
             retval = await func(*args, **kwargs)
-        except Exception as exc:
+        except (Exception,ExceptionGroup) as exc:
             self._result_queue.append(Error(exc))
         except BaseException as exc:
-            self._result_queue.append(Error(exc))
+            self._result_queue.append(Error(ConcurrentCancel()))
             raise
         else:
             self._result_queue.append(Value(retval))
