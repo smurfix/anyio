@@ -2,8 +2,16 @@ import math
 from contextlib import contextmanager
 from typing import Any, Generator, Optional
 
-from ..abc import CancelScope, TaskGroup
+from ..abc import CancelScope, TaskGroup, TaskStatus
 from ._eventloop import get_asynclib
+
+
+class _IgnoredTaskStatus(TaskStatus):
+    def started(self, value=None) -> None:
+        pass
+
+
+TASK_STATUS_IGNORED = _IgnoredTaskStatus()
 
 
 def open_cancel_scope(*, shield: bool = False) -> CancelScope:
@@ -35,7 +43,6 @@ def fail_after(delay: Optional[float], shield: bool = False) -> Generator[Cancel
 
     if cancel_scope.cancel_called:
         raise TimeoutError
-
 
 def move_on_after(delay: Optional[float], shield: bool = False) -> CancelScope:
     """

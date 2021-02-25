@@ -7,7 +7,7 @@ from collections import OrderedDict, deque
 from concurrent.futures import Future
 from contextlib import contextmanager
 from dataclasses import dataclass
-from functools import wraps
+from functools import partial, wraps
 from inspect import isgenerator
 from socket import AddressFamily, SocketKind, SocketType
 from threading import Thread
@@ -378,9 +378,7 @@ class ExceptionGroup(BaseExceptionGroup):
         self.exceptions = exceptions
 
 
-class TaskStatus:
-    __slots__ = '_future'
-
+class _AsyncioTaskStatus(abc.TaskStatus):
     def __init__(self, future: asyncio.Future):
         self._future = future
 
@@ -464,7 +462,7 @@ class TaskGroup(abc.TaskGroup):
         # and asyncio before v3.8 cannot deal with tasks raising BaseExceptions.
         kwargs = {}
         if task_status_future:
-            kwargs['task_status'] = TaskStatus(task_status_future)
+            kwargs['task_status'] = _AsyncioTaskStatus(task_status_future)
 
         task = cast(asyncio.Task, current_task())
         try:
@@ -598,9 +596,11 @@ class BlockingPortal(abc.BlockingPortal):
         super().__init__()
         self._loop = get_running_loop()
 
-    def _spawn_task_from_thread(self, func: Callable, args: tuple, future: Future) -> None:
+    def _spawn_task_from_thread(self, func: Callable, args: tuple, kwargs: Dict[str, Any],
+                                name, future: Future) -> None:
         run_sync_from_thread(
-            self._task_group.spawn, self._call_func, func, args, future, loop=self._loop)
+            partial(self._task_group.spawn, name=name), self._call_func, func, args, kwargs,
+            future, loop=self._loop)
 
 
 #
@@ -1274,7 +1274,11 @@ class _SignalReceiver:
         self._signal_queue.append(signum)
         self._future.set_result(None)
 
+    def __aiter__(self):
+        return self
+
     async def __anext__(self) -> int:
+        await checkpoint()
         if not self._signal_queue:
             self._future = asyncio.Future()
             await self._future
