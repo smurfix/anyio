@@ -5,9 +5,10 @@ from threading import Thread
 
 import pytest
 
-from anyio import BrokenResourceError, EndOfStream, connect_tcp
-from anyio.abc import SocketAttribute
-from anyio.streams.tls import TLSAttribute, TLSStream
+from anyio import (
+    BrokenResourceError, EndOfStream, Event, connect_tcp, create_task_group, create_tcp_listener)
+from anyio.abc import AnyByteStream, SocketAttribute, SocketStream
+from anyio.streams.tls import TLSAttribute, TLSListener, TLSStream
 
 pytestmark = pytest.mark.anyio
 
@@ -210,3 +211,72 @@ class TestTLSStream:
 
         server_thread.join()
         server_sock.close()
+
+    @pytest.mark.parametrize('force_tlsv12', [
+        pytest.param(False, marks=[pytest.mark.skipif(not getattr(ssl, 'HAS_TLSv1_3', False),
+                                                      reason='No TLS 1.3 support')]),
+        pytest.param(True)
+    ], ids=['tlsv13', 'tlsv12'])
+    async def test_send_eof_not_implemented(self, server_context, ca, force_tlsv12):
+        def serve_sync():
+            conn, addr = server_sock.accept()
+            conn.sendall(b'hello')
+            conn.unwrap()
+            conn.close()
+
+        client_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        ca.configure_trust(client_context)
+        if force_tlsv12:
+            expected_pattern = r'send_eof\(\) requires at least TLSv1.3'
+            client_context.options |= ssl.OP_NO_TLSv1_3
+        else:
+            expected_pattern = r'send_eof\(\) has not yet been implemented for TLS streams'
+
+        server_sock = server_context.wrap_socket(socket.socket(), server_side=True,
+                                                 suppress_ragged_eofs=False)
+        server_sock.settimeout(1)
+        server_sock.bind(('127.0.0.1', 0))
+        server_sock.listen()
+        server_thread = Thread(target=serve_sync, daemon=True)
+        server_thread.start()
+
+        stream = await connect_tcp(*server_sock.getsockname())
+        async with await TLSStream.wrap(stream, hostname='localhost',
+                                        ssl_context=client_context) as wrapper:
+            assert await wrapper.receive() == b'hello'
+            with pytest.raises(NotImplementedError) as exc:
+                await wrapper.send_eof()
+
+            exc.match(expected_pattern)
+
+        server_thread.join()
+        server_sock.close()
+
+
+class TestTLSListener:
+    async def test_handshake_fail(self, server_context):
+        def handler(stream):
+            pytest.fail('This function should never be called in this scenario')
+
+        class CustomTLSListener(TLSListener):
+            async def handle_handshake_error(self, exc: BaseException,
+                                             stream: AnyByteStream) -> None:
+                nonlocal exception
+                await super().handle_handshake_error(exc, stream)
+                assert isinstance(stream, SocketStream)
+                exception = exc
+                event.set()
+
+        exception = None
+        event = Event()
+        listener = await create_tcp_listener(local_host='127.0.0.1')
+        tls_listener = CustomTLSListener(listener, server_context)
+        async with tls_listener, create_task_group() as tg:
+            tg.spawn(tls_listener.serve, handler)
+            sock = socket.socket()
+            sock.connect(listener.extra(SocketAttribute.local_address))
+            sock.close()
+            await event.wait()
+            tg.cancel_scope.cancel()
+
+        assert isinstance(exception, BrokenResourceError)

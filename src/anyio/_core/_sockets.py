@@ -7,13 +7,14 @@ from pathlib import Path
 from socket import AddressFamily, SocketKind
 from typing import Awaitable, List, Optional, Tuple, Union, cast, overload
 
-from ..abc import ConnectedUDPSocket, Event, SocketListener, SocketStream, UDPSocket
-from ..abc.sockets import IPAddressType, IPSockAddrType
+from ..abc import (
+    ConnectedUDPSocket, IPAddressType, IPSockAddrType, SocketListener, SocketStream, UDPSocket,
+    UNIXSocketStream)
 from ..streams.stapled import MultiListener
 from ..streams.tls import TLSStream
 from ._eventloop import get_asynclib
 from ._resources import aclose_forcefully
-from ._synchronization import create_event
+from ._synchronization import Event
 from ._tasks import create_task_group, move_on_after
 from ._threads import run_sync_in_worker_thread
 
@@ -128,11 +129,11 @@ async def connect_tcp(
         else:
             if connected_stream is None:
                 connected_stream = stream
-                await tg.cancel_scope.cancel()
+                tg.cancel_scope.cancel()
             else:
                 await stream.aclose()
         finally:
-            await event.set()
+            event.set()
 
     asynclib = get_asynclib()
     local_address: Optional[IPSockAddrType] = None
@@ -171,9 +172,9 @@ async def connect_tcp(
     oserrors: List[OSError] = []
     async with create_task_group() as tg:
         for i, (af, addr) in enumerate(target_addrs):
-            event = create_event()
-            await tg.spawn(try_connect, addr, event)
-            async with move_on_after(happy_eyeballs_delay):
+            event = Event()
+            tg.spawn(try_connect, addr, event)
+            with move_on_after(happy_eyeballs_delay):
                 await event.wait()
 
     if connected_stream is None:
@@ -193,7 +194,7 @@ async def connect_tcp(
     return connected_stream
 
 
-async def connect_unix(path: Union[str, PathLike]) -> SocketStream:
+async def connect_unix(path: Union[str, PathLike]) -> UNIXSocketStream:
     """
     Connect to the given UNIX socket.
 
@@ -211,7 +212,7 @@ async def create_tcp_listener(
     *, local_host: Optional[IPAddressType] = None, local_port: int = 0,
     family: AnyIPAddressFamily = socket.AddressFamily.AF_UNSPEC, backlog: int = 65536,
     reuse_port: bool = False
-) -> MultiListener[SocketStream[IPSockAddrType]]:
+) -> MultiListener[SocketStream]:
     """
     Create a TCP socket listener.
 
@@ -233,7 +234,7 @@ async def create_tcp_listener(
     gai_res = await getaddrinfo(local_host, local_port, family=family,  # type: ignore[arg-type]
                                 type=socket.SOCK_STREAM,
                                 flags=socket.AI_PASSIVE | socket.AI_ADDRCONFIG)
-    listeners: List[SocketListener[IPSockAddrType]] = []
+    listeners: List[SocketListener] = []
     try:
         # The set() is here to work around a glibc bug:
         # https://sourceware.org/bugzilla/show_bug.cgi?id=14969
@@ -256,7 +257,7 @@ async def create_tcp_listener(
 
             raw_socket.bind(sockaddr)
             raw_socket.listen(backlog)
-            listener = asynclib.SocketListener(raw_socket)
+            listener = asynclib.TCPSocketListener(raw_socket)
             listeners.append(listener)
     except BaseException:
         for listener in listeners:
@@ -269,7 +270,7 @@ async def create_tcp_listener(
 
 async def create_unix_listener(
         path: Union[str, PathLike], *, mode: Optional[int] = None,
-        backlog: int = 65536) -> SocketListener[str]:
+        backlog: int = 65536) -> SocketListener:
     """
     Create a UNIX socket listener.
 
@@ -292,7 +293,7 @@ async def create_unix_listener(
             await run_sync_in_worker_thread(chmod, path, mode, cancellable=True)
 
         raw_socket.listen(backlog)
-        return get_asynclib().SocketListener(raw_socket)
+        return get_asynclib().UNIXSocketListener(raw_socket)
     except BaseException:
         raw_socket.close()
         raise
@@ -309,7 +310,7 @@ async def create_udp_socket(
     making this socket suitable for providing UDP based services.
 
     :param family: address family (``AF_INET`` or ``AF_INET6``) – automatically determined from
-        ``interface`` or ``target_host`` if omitted
+        ``local_host`` if omitted
     :param local_host: IP address or host name of the local interface to bind to
     :param local_port: local port to bind to
     :param reuse_port: ``True`` to allow multiple sockets to bind to the same address/port
@@ -430,6 +431,9 @@ def wait_socket_readable(sock: socket.socket) -> Awaitable[None]:
     This does **NOT** work on Windows when using the asyncio backend with a proactor event loop
     (default on py3.8+).
 
+    .. warning:: Only use this on raw sockets that have not been wrapped by any higher level
+        constructs like socket streams!
+
     :param sock: a socket object
     :raises ~anyio.ClosedResourceError: if the socket was closed while waiting for the
         socket to become readable
@@ -446,6 +450,9 @@ def wait_socket_writable(sock: socket.socket) -> Awaitable[None]:
 
     This does **NOT** work on Windows when using the asyncio backend with a proactor event loop
     (default on py3.8+).
+
+    .. warning:: Only use this on raw sockets that have not been wrapped by any higher level
+        constructs like socket streams!
 
     :param sock: a socket object
     :raises ~anyio.ClosedResourceError: if the socket was closed while waiting for the

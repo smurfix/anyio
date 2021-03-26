@@ -25,7 +25,8 @@ Memory object streams
 
 Memory object streams are intended for implementing a producer-consumer pattern with multiple
 tasks. Using :func:`~create_memory_object_stream`, you get a pair of object streams: one for
-sending, one for receiving.
+sending, one for receiving. They essentially work like queues, but with support for closing
+and asynchronous iteration.
 
 By default, memory object streams are created with a buffer size of 0. This means that
 :meth:`~.streams.memory.MemoryObjectSendStream.send` will block until there's another task
@@ -59,7 +60,7 @@ Example::
     async def main():
         send_stream, receive_stream = create_memory_object_stream()
         async with create_task_group() as tg:
-            await tg.spawn(process_items, receive_stream)
+            tg.spawn(process_items, receive_stream)
             async with send_stream:
                 for num in range(10):
                     await send_stream.send(f'number {num}')
@@ -140,6 +141,36 @@ The above script gives the following output::
 
     b'\xc3\xa5\xc3\xa4\xc3\xb6'
     'åäö'
+
+.. _FileStreams:
+
+File streams
+------------
+
+File streams read from or write to files on the file system. They can be useful for substituting
+a file for another source of data, or writing output to a file for logging or debugging purposes.
+
+Example::
+
+    from anyio import run
+    from anyio.streams.file import FileReadStream, FileWriteStream
+
+
+    async def main():
+        path = '/tmp/testfile'
+        async with await FileWriteStream.from_path(path) as stream:
+            await stream.send(b'Hello, World!')
+
+        async with await FileReadStream.from_path(path) as stream:
+            async for chunk in stream:
+                print(chunk.decode(), end='')
+
+        print()
+
+    run(main)
+
+.. versionadded:: 3.0
+
 
 .. _TLS:
 

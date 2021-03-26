@@ -15,11 +15,11 @@ To install AnyIO, run:
 
     pip install anyio
 
-To install a supported version of trio_ or curio_, you can use install them as extras like this:
+To install a supported version of trio_, you can use install it as an extra like this:
 
 .. code-block:: bash
 
-    pip install anyio[curio]
+    pip install anyio[trio]
 
 Running async programs
 ----------------------
@@ -54,6 +54,25 @@ But AnyIO code is not required to be run via :func:`run`. You can just as well u
 
     trio.run(main)
 
+.. _backend options:
+
+Backend specific options
+------------------------
+
+Asyncio:
+
+* ``debug`` (``bool``, default=False): Enables `debug mode`_ in the event loop
+* ``use_uvloop`` (``bool``, default=True): Use the faster uvloop_ event loop implementation, if
+  available
+* ``policy`` (``AbstractEventLoopPolicy``, default=None): the event loop policy instance to use
+  for creating a new event loop (overrides ``use_uvloop``)
+
+Trio: options covered in the
+`official documentation <https://trio.readthedocs.io/en/stable/reference-core.html#trio.run>`_
+
+.. _debug mode: https://docs.python.org/3/library/asyncio-eventloop.html#enabling-debug-mode
+.. _uvloop: https://pypi.org/project/uvloop/
+
 Using native async libraries
 ----------------------------
 
@@ -69,4 +88,3 @@ of your choice. There are a few rules to keep in mind however:
 
 .. _virtualenv: https://docs.python-guide.org/dev/virtualenvs/
 .. _trio: https://github.com/python-trio/trio
-.. _curio: https://github.com/dabeaz/curio

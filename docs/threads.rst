@@ -5,7 +5,7 @@ Working with threads
 
 Practical asynchronous applications occasionally need to run network, file or computationally
 expensive operations. Such operations would normally block the asynchronous event loop, leading to
-performance issues. To solution is to run such code in *worker threads*. Using worker threads lets
+performance issues. The solution is to run such code in *worker threads*. Using worker threads lets
 the event loop continue running other tasks while the worker thread runs the blocking call.
 
  .. caution:: Do not spawn too many threads, as the context switching overhead may cause your
@@ -63,14 +63,6 @@ One way to do this is to start a new event loop with a portal, using
     from anyio import start_blocking_portal
 
 
-    portal = start_blocking_portal(backend='trio')
-    portal.call(...)
-
-    # At the end of your application, stop the portal
-    portal.stop_from_external_thread()
-
-Or, you can it as a context manager if that suits your use case::
-
     with start_blocking_portal(backend='trio') as portal:
         portal.call(...)
 
@@ -86,3 +78,77 @@ use :func:`~create_blocking_portal` directly::
             await portal.sleep_until_stopped()
 
     anyio.run(main)
+
+Spawning tasks from worker threads
+----------------------------------
+
+When you need to spawn a task to be run in the background, you can do so using
+:meth:`~.BlockingPortal.spawn_task`::
+
+    from concurrent.futures import as_completed
+
+    from anyio import start_blocking_portal, sleep
+
+
+    async def long_running_task(index):
+        await sleep(1)
+        print(f'Task {index} running...')
+        await sleep(index)
+        return f'Task {index} return value'
+
+
+    with start_blocking_portal() as portal:
+        futures = [portal.spawn_task(long_running_task, i) for i in range(1, 5)]
+        for future in as_completed(futures):
+            print(future.result())
+
+Cancelling tasks spawned this way can be done by cancelling the returned
+:class:`~concurrent.futures.Future`.
+
+Blocking portals also have a method similar to :meth:`TaskGroup.start() <.abc.TaskGroup.start>`:
+:meth:`~.BlockingPortal.start_task` which, like its counterpart, waits for the callable to signal
+readiness by calling ``task_status.started()``::
+
+    from anyio import sleep, start_blocking_portal, TASK_STATUS_IGNORED
+
+
+    async def service_task(*, task_status=TASK_STATUS_IGNORED):
+        task_status.started('STARTED')
+        await sleep(1)
+        return 'DONE'
+
+
+    with start_blocking_portal() as portal:
+        future, start_value = portal.start_task(service_task)
+        print('Task has started with value', start_value)
+
+        return_value = future.result()
+        print('Task has finished with return value', return_value)
+
+
+Using asynchronous context managers from worker threads
+-------------------------------------------------------
+
+You can use :meth:`~.BlockingPortal.wrap_async_context_manager` to wrap an asynchronous context
+managers as a synchronous one::
+
+    from anyio import start_blocking_portal
+
+
+    class AsyncContextManager:
+        async def __aenter__(self):
+            print('entering')
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            print('exiting with', exc_type)
+
+
+    async_cm = AsyncContextManager()
+    with start_blocking_portal() as portal, portal.wrap_async_context_manager(async_cm):
+        print('inside the context manager block')
+
+.. note:: You cannot use wrapped async context managers in synchronous callbacks inside the event
+          loop thread.
+
+.. note:: The ``__aenter__()`` and ``__aexit__()`` methods will be called from different
+          tasks so a task group as the async context manager will not work here.

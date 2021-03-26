@@ -1,19 +1,22 @@
+import array
+import os
 import platform
 import socket
 import sys
+import threading
 import time
 from contextlib import suppress
 from ssl import SSLError
-from threading import Event, Thread
+from threading import Thread
 
 import pytest
 
 from anyio import (
-    BusyResourceError, ClosedResourceError, ExceptionGroup, TypedAttributeLookupError, connect_tcp,
-    connect_unix, create_connected_udp_socket, create_event, create_task_group,
-    create_tcp_listener, create_udp_socket, create_unix_listener, getaddrinfo, getnameinfo,
-    move_on_after, wait_all_tasks_blocked)
-from anyio.abc.sockets import SocketAttribute
+    BrokenResourceError, BusyResourceError, ClosedResourceError, Event, ExceptionGroup,
+    TypedAttributeLookupError, connect_tcp, connect_unix, create_connected_udp_socket,
+    create_task_group, create_tcp_listener, create_udp_socket, create_unix_listener, fail_after,
+    getaddrinfo, getnameinfo, move_on_after, sleep, wait_all_tasks_blocked)
+from anyio.abc import SocketAttribute
 from anyio.streams.stapled import MultiListener
 
 pytestmark = pytest.mark.anyio
@@ -131,7 +134,7 @@ class TestTCPStream:
             client.sendall(b'ah')
             client.close()
 
-        event = Event()
+        event = threading.Event()
         thread = Thread(target=serve, daemon=True)
         thread.start()
         chunks = []
@@ -209,7 +212,7 @@ class TestTCPStream:
         thread.start()
         async with await connect_tcp(*server_addr) as stream:
             start_time = time.monotonic()
-            async with move_on_after(0.1):
+            with move_on_after(0.1):
                 while time.monotonic() - start_time < 0.3:
                     await stream.receive(1)
 
@@ -222,18 +225,18 @@ class TestTCPStream:
 
         async with await connect_tcp(*server_addr) as stream:
             async with create_task_group() as tg:
-                await tg.spawn(send_data)
+                tg.spawn(send_data)
                 await wait_all_tasks_blocked()
                 with pytest.raises(BusyResourceError) as exc:
                     await stream.send(b'foo')
 
                 exc.match('already writing to')
-                await tg.cancel_scope.cancel()
+                tg.cancel_scope.cancel()
 
     async def test_concurrent_receive(self, server_addr):
         async with await connect_tcp(*server_addr) as client:
             async with create_task_group() as tg:
-                await tg.spawn(client.receive)
+                tg.spawn(client.receive)
                 await wait_all_tasks_blocked()
                 try:
                     with pytest.raises(BusyResourceError) as exc:
@@ -241,7 +244,7 @@ class TestTCPStream:
 
                     exc.match('already reading from')
                 finally:
-                    await tg.cancel_scope.cancel()
+                    tg.cancel_scope.cancel()
 
     async def test_close_during_receive(self, server_addr):
         async def interrupt():
@@ -250,7 +253,7 @@ class TestTCPStream:
 
         async with await connect_tcp(*server_addr) as stream:
             async with create_task_group() as tg:
-                await tg.spawn(interrupt)
+                tg.spawn(interrupt)
                 with pytest.raises(ClosedResourceError):
                     await stream.receive()
 
@@ -265,6 +268,27 @@ class TestTCPStream:
         await stream.aclose()
         with pytest.raises(ClosedResourceError):
             await stream.send(b'foo')
+
+    async def test_send_after_peer_closed(self, family):
+        def serve_once():
+            client_sock, _ = server_sock.accept()
+            client_sock.close()
+            server_sock.close()
+
+        server_sock = socket.socket(family, socket.SOCK_STREAM)
+        server_sock.settimeout(1)
+        server_sock.bind(('localhost', 0))
+        server_addr = server_sock.getsockname()[:2]
+        server_sock.listen()
+        thread = Thread(target=serve_once, daemon=True)
+        thread.start()
+
+        with pytest.raises(BrokenResourceError):
+            async with await connect_tcp(*server_addr) as stream:
+                for _ in range(1000):
+                    await stream.send(b'foo')
+
+        thread.join()
 
     async def test_connect_tcp_with_tls(self, server_context, client_context, server_sock,
                                         server_addr):
@@ -349,6 +373,13 @@ class TestTCPListener:
                 client.close()
                 await stream.aclose()
 
+    async def test_accept_after_close(self, family):
+        async with await create_tcp_listener(local_host='localhost', family=family) as multi:
+            for listener in multi.listeners:
+                await listener.aclose()
+                with pytest.raises(ClosedResourceError):
+                    await listener.accept()
+
     async def test_socket_options(self, family):
         async with await create_tcp_listener(local_host='localhost', family=family) as multi:
             for listener in multi.listeners:
@@ -374,7 +405,8 @@ class TestTCPListener:
 
                 client.close()
 
-    @pytest.mark.skipif(sys.platform == 'win32', reason='Not supported on Windows')
+    @pytest.mark.skipif(not hasattr(socket, "SO_REUSEPORT"),
+                        reason='SO_REUSEPORT option not supported')
     async def test_reuse_port(self, family):
         multi1 = await create_tcp_listener(local_host='localhost', family=family, reuse_port=True)
         assert len(multi1.listeners) == 1
@@ -389,6 +421,41 @@ class TestTCPListener:
             multi2.listeners[0].extra(SocketAttribute.local_address)
         await multi1.aclose()
         await multi2.aclose()
+
+    async def test_close_from_other_task(self, family):
+        listener = await create_tcp_listener(local_host='localhost', family=family)
+        with pytest.raises(ClosedResourceError):
+            async with create_task_group() as tg:
+                tg.spawn(listener.serve, lambda stream: None)
+                await wait_all_tasks_blocked()
+                await listener.aclose()
+                tg.cancel_scope.cancel()
+
+    async def test_send_after_eof(self, family):
+        async def handle(stream):
+            async with stream:
+                await stream.send(b'Hello\n')
+
+        multi = await create_tcp_listener(family=family, local_host='localhost')
+        async with multi, create_task_group() as tg:
+            tg.spawn(multi.serve, handle)
+            await wait_all_tasks_blocked()
+
+            with socket.socket(family) as client:
+                client.connect(multi.extra(SocketAttribute.local_address))
+                client.shutdown(socket.SHUT_WR)
+                client.setblocking(False)
+                with fail_after(1):
+                    while True:
+                        try:
+                            message = client.recv(10)
+                        except BlockingIOError:
+                            await sleep(0)
+                        else:
+                            assert message == b'Hello\n'
+                            break
+
+            tg.cancel_scope.cancel()
 
 
 @pytest.mark.skipif(sys.platform == 'win32',
@@ -445,6 +512,72 @@ class TestUNIXStream:
         thread.join()
         assert response == buffer
 
+    async def test_receive_fds(self, server_sock, socket_path, tmp_path):
+        def serve():
+            path1 = tmp_path / 'file1'
+            path2 = tmp_path / 'file2'
+            path1.write_text('Hello, ')
+            path2.write_text('World!')
+            with path1.open() as file1, path2.open() as file2:
+                fdarray = array.array('i', [file1.fileno(), file2.fileno()])
+                client, _ = server_sock.accept()
+                with client:
+                    client.sendmsg([b'test'], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fdarray)])
+
+        async with await connect_unix(socket_path) as stream:
+            thread = Thread(target=serve, daemon=True)
+            thread.start()
+            message, fds = await stream.receive_fds(10, 2)
+            thread.join()
+
+        text = ''
+        for fd in fds:
+            with os.fdopen(fd) as file:
+                text += file.read()
+
+        assert message == b'test'
+        assert text == 'Hello, World!'
+
+    async def test_receive_fds_bad_args(self, server_sock, socket_path):
+        async with await connect_unix(socket_path) as stream:
+            for msglen in (-1, 'foo'):
+                with pytest.raises(ValueError, match='msglen must be a non-negative integer'):
+                    await stream.receive_fds(msglen, 0)
+
+            for maxfds in (0, 'foo'):
+                with pytest.raises(ValueError, match='maxfds must be a positive integer'):
+                    await stream.receive_fds(0, maxfds)
+
+    async def test_send_fds(self, server_sock, socket_path, tmp_path):
+        def serve():
+            fds = array.array('i')
+            client, _ = server_sock.accept()
+            msg, ancdata, *_ = client.recvmsg(10, socket.CMSG_LEN(2 * fds.itemsize))
+            client.close()
+            assert msg == b'test'
+            for cmsg_level, cmsg_type, cmsg_data in ancdata:
+                assert cmsg_level == socket.SOL_SOCKET
+                assert cmsg_type == socket.SCM_RIGHTS
+                fds.frombytes(cmsg_data[:len(cmsg_data) - (len(cmsg_data) % fds.itemsize)])
+
+            text = ''
+            for fd in fds:
+                with os.fdopen(fd) as file:
+                    text += file.read()
+
+            assert text == 'Hello, World!'
+
+        path1 = tmp_path / 'file1'
+        path2 = tmp_path / 'file2'
+        path1.write_text('Hello, ')
+        path2.write_text('World!')
+        with path1.open() as file1, path2.open() as file2, fail_after(2):
+            async with await connect_unix(socket_path) as stream:
+                thread = Thread(target=serve, daemon=True)
+                thread.start()
+                await stream.send_fds(b'test', [file1, file2])
+                thread.join()
+
     async def test_send_eof(self, server_sock, socket_path):
         def serve():
             client, _ = server_sock.accept()
@@ -487,6 +620,14 @@ class TestUNIXStream:
         thread.join()
         assert chunks == [b'bl', b'ah']
 
+    async def test_send_fds_bad_args(self, server_sock, socket_path):
+        async with await connect_unix(socket_path) as stream:
+            with pytest.raises(ValueError, match='message must not be empty'):
+                await stream.send_fds(b'', [0])
+
+            with pytest.raises(ValueError, match='fds must not be empty'):
+                await stream.send_fds(b'test', [])
+
     async def test_concurrent_send(self, server_sock, socket_path):
         async def send_data():
             while True:
@@ -494,18 +635,18 @@ class TestUNIXStream:
 
         async with await connect_unix(socket_path) as client:
             async with create_task_group() as tg:
-                await tg.spawn(send_data)
+                tg.spawn(send_data)
                 await wait_all_tasks_blocked()
                 with pytest.raises(BusyResourceError) as exc:
                     await client.send(b'foo')
 
                 exc.match('already writing to')
-                await tg.cancel_scope.cancel()
+                tg.cancel_scope.cancel()
 
     async def test_concurrent_receive(self, server_sock, socket_path):
         async with await connect_unix(socket_path) as client:
             async with create_task_group() as tg:
-                await tg.spawn(client.receive)
+                tg.spawn(client.receive)
                 await wait_all_tasks_blocked()
                 try:
                     with pytest.raises(BusyResourceError) as exc:
@@ -513,7 +654,7 @@ class TestUNIXStream:
 
                     exc.match('already reading from')
                 finally:
-                    await tg.cancel_scope.cancel()
+                    tg.cancel_scope.cancel()
 
     async def test_close_during_receive(self, server_sock, socket_path):
         async def interrupt():
@@ -522,7 +663,7 @@ class TestUNIXStream:
 
         async with await connect_unix(socket_path) as stream:
             async with create_task_group() as tg:
-                await tg.spawn(interrupt)
+                tg.spawn(interrupt)
                 with pytest.raises(ClosedResourceError):
                     await stream.receive()
 
@@ -590,11 +731,36 @@ class TestUNIXListener:
 
             client.close()
 
+    async def test_send_after_eof(self, socket_path):
+        async def handle(stream):
+            async with stream:
+                await stream.send(b'Hello\n')
+
+        async with await create_unix_listener(socket_path) as listener, create_task_group() as tg:
+            tg.spawn(listener.serve, handle)
+            await wait_all_tasks_blocked()
+
+            with socket.socket(socket.AF_UNIX) as client:
+                client.connect(str(socket_path))
+                client.shutdown(socket.SHUT_WR)
+                client.setblocking(False)
+                with fail_after(1):
+                    while True:
+                        try:
+                            message = client.recv(10)
+                        except BlockingIOError:
+                            await sleep(0)
+                        else:
+                            assert message == b'Hello\n'
+                            break
+
+            tg.cancel_scope.cancel()
+
 
 async def test_multi_listener(tmp_path_factory):
     async def handle(stream):
         client_addresses.append(stream.extra(SocketAttribute.remote_address))
-        await event.set()
+        event.set()
         await stream.aclose()
 
     client_addresses = []
@@ -606,9 +772,9 @@ async def test_multi_listener(tmp_path_factory):
     expected_addresses = []
     async with MultiListener(listeners) as multi_listener:
         async with create_task_group() as tg:
-            await tg.spawn(multi_listener.serve, handle)
+            tg.spawn(multi_listener.serve, handle)
             for listener in multi_listener.listeners:
-                event = create_event()
+                event = Event()
                 local_address = listener.extra(SocketAttribute.local_address)
                 if sys.platform != 'win32' and listener.extra(SocketAttribute.family) == \
                         socket.AddressFamily.AF_UNIX:
@@ -620,7 +786,7 @@ async def test_multi_listener(tmp_path_factory):
                 await event.wait()
                 await stream.aclose()
 
-            await tg.cancel_scope.cancel()
+            tg.cancel_scope.cancel()
 
     assert client_addresses == expected_addresses
 
@@ -658,14 +824,15 @@ class TestUDPSocket:
             host, port = server.extra(SocketAttribute.local_address)
             async with await create_udp_socket(family=family, local_host='localhost') as client:
                 async with create_task_group() as tg:
-                    await tg.spawn(serve)
+                    tg.spawn(serve)
                     await client.sendto(b'FOOBAR', host, port)
                     assert await client.receive() == (b'RABOOF', (host, port))
                     await client.sendto(b'123456', host, port)
                     assert await client.receive() == (b'654321', (host, port))
-                    await tg.cancel_scope.cancel()
+                    tg.cancel_scope.cancel()
 
-    @pytest.mark.skipif(sys.platform == 'win32', reason='Not supported on Windows')
+    @pytest.mark.skipif(not hasattr(socket, "SO_REUSEPORT"),
+                        reason='SO_REUSEPORT option not supported')
     async def test_reuse_port(self, family):
         async with await create_udp_socket(family=family, local_host='localhost',
                                            reuse_port=True) as udp:
@@ -678,7 +845,7 @@ class TestUDPSocket:
     async def test_concurrent_receive(self):
         async with await create_udp_socket(family=socket.AF_INET, local_host='localhost') as udp:
             async with create_task_group() as tg:
-                await tg.spawn(udp.receive)
+                tg.spawn(udp.receive)
                 await wait_all_tasks_blocked()
                 try:
                     with pytest.raises(BusyResourceError) as exc:
@@ -686,7 +853,7 @@ class TestUDPSocket:
 
                     exc.match('already reading from')
                 finally:
-                    await tg.cancel_scope.cancel()
+                    tg.cancel_scope.cancel()
 
     async def test_close_during_receive(self):
         async def close_when_blocked():
@@ -695,7 +862,7 @@ class TestUDPSocket:
 
         async with await create_udp_socket(family=socket.AF_INET, local_host='localhost') as udp:
             async with create_task_group() as tg:
-                await tg.spawn(close_when_blocked)
+                tg.spawn(close_when_blocked)
                 with pytest.raises(ClosedResourceError):
                     await udp.receive()
 
@@ -748,14 +915,15 @@ class TestConnectedUDPSocket:
             async with await create_connected_udp_socket(host, port) as udp2:
                 host, port = udp2.extra(SocketAttribute.local_address)
                 async with create_task_group() as tg:
-                    await tg.spawn(serve)
+                    tg.spawn(serve)
                     await udp1.sendto(b'FOOBAR', host, port)
                     assert await udp1.receive() == (b'RABOOF', (host, port))
                     await udp1.sendto(b'123456', host, port)
                     assert await udp1.receive() == (b'654321', (host, port))
-                    await tg.cancel_scope.cancel()
+                    tg.cancel_scope.cancel()
 
-    @pytest.mark.skipif(sys.platform == 'win32', reason='Not supported on Windows')
+    @pytest.mark.skipif(not hasattr(socket, "SO_REUSEPORT"),
+                        reason='SO_REUSEPORT option not supported')
     async def test_reuse_port(self, family):
         async with await create_connected_udp_socket(
                 'localhost', 6000, family=family, local_host='localhost', reuse_port=True) as udp:
@@ -770,7 +938,7 @@ class TestConnectedUDPSocket:
         async with await create_connected_udp_socket(
                 'localhost', 5000, local_host='localhost', family=socket.AF_INET) as udp:
             async with create_task_group() as tg:
-                await tg.spawn(udp.receive)
+                tg.spawn(udp.receive)
                 await wait_all_tasks_blocked()
                 try:
                     with pytest.raises(BusyResourceError) as exc:
@@ -778,7 +946,7 @@ class TestConnectedUDPSocket:
 
                     exc.match('already reading from')
                 finally:
-                    await tg.cancel_scope.cancel()
+                    tg.cancel_scope.cancel()
 
     async def test_close_during_receive(self):
         async def close_when_blocked():
@@ -788,7 +956,7 @@ class TestConnectedUDPSocket:
         async with await create_connected_udp_socket(
                 'localhost', 5000, local_host='localhost', family=socket.AF_INET) as udp:
             async with create_task_group() as tg:
-                await tg.spawn(close_when_blocked)
+                tg.spawn(close_when_blocked)
                 with pytest.raises(ClosedResourceError):
                     await udp.receive()
 
@@ -807,6 +975,7 @@ class TestConnectedUDPSocket:
             await udp.send(b'foo')
 
 
+@pytest.mark.network
 async def test_getaddrinfo():
     # IDNA 2003 gets this wrong
     correct = await getaddrinfo('faß.de', 0)

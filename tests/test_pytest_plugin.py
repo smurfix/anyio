@@ -9,25 +9,34 @@ pytestmark = pytest.mark.filterwarnings(
 def test_plugin(testdir):
     testdir.makeconftest(
         """
-        import anyio
         import sniffio
         import pytest
+
+        from anyio import sleep
 
 
         @pytest.fixture
         async def async_fixture():
-            await anyio.sleep(0)
+            await sleep(0)
             return sniffio.current_async_library()
+
+
+        @pytest.fixture
+        async def some_feature():
+            yield None
+            await sleep(0)
         """
     )
 
     testdir.makepyfile(
         """
-        import pytest
+        import asyncio
 
+        import pytest
         import sniffio
-        from anyio import get_all_backends, sleep
         from hypothesis import strategies, given
+
+        from anyio import get_all_backends, sleep
 
 
         @pytest.mark.anyio
@@ -40,32 +49,92 @@ def test_plugin(testdir):
             # Test that async functions can use async fixtures
             assert async_fixture in get_all_backends()
 
-        @pytest.mark.parametrize('anyio_backend', ['curio'])
-        async def test_explicit_backend(anyio_backend):
-            # Test that when specifying the backend explicitly with parametrize, the correct
-            # backend is really used
-            assert anyio_backend == 'curio'
-            assert sniffio.current_async_library() == 'curio'
-
         def test_async_fixture_from_sync_test(anyio_backend_name, async_fixture):
             # Test that regular functions can use async fixtures too
             assert async_fixture == anyio_backend_name
 
-        @pytest.mark.parametrize('anyio_backend', ['asyncio'], scope='class')
+        @pytest.mark.anyio
+        async def test_skip_inline(some_feature):
+            # Test for github #214
+            pytest.skip("Test that skipping works")
+        """
+    )
+
+    result = testdir.runpytest('-v')
+    result.assert_outcomes(passed=3 * len(get_all_backends()), skipped=len(get_all_backends()))
+
+
+def test_asyncio(testdir):
+    testdir.makeconftest(
+        """
+        import asyncio
+        import pytest
+
+
+        @pytest.fixture(scope='class')
+        def anyio_backend():
+            return 'asyncio'
+
+        @pytest.fixture
+        async def setup_fail_fixture():
+            def callback():
+                raise RuntimeError('failing fixture setup')
+
+            asyncio.get_event_loop().call_soon(callback)
+            await asyncio.sleep(0)
+            yield None
+
+        @pytest.fixture
+        async def teardown_fail_fixture():
+            def callback():
+                raise RuntimeError('failing fixture teardown')
+
+            yield None
+            asyncio.get_event_loop().call_soon(callback)
+            await asyncio.sleep(0)
+        """
+    )
+
+    testdir.makepyfile(
+        """
+        import asyncio
+
+        import pytest
+
+        pytestmark = pytest.mark.anyio
+
+
         class TestClassFixtures:
             @pytest.fixture(scope='class')
             async def async_class_fixture(self, anyio_backend):
-                await sleep(0)
+                await asyncio.sleep(0)
                 return anyio_backend
 
             def test_class_fixture_in_test_method(self, async_class_fixture, anyio_backend_name):
                 assert anyio_backend_name == 'asyncio'
                 assert async_class_fixture == 'asyncio'
+
+        async def test_callback_exception_during_test():
+            def callback():
+                nonlocal started
+                started = True
+                raise Exception('foo')
+
+            started = False
+            asyncio.get_event_loop().call_soon(callback)
+            await asyncio.sleep(0)
+            assert started
+
+        async def test_callback_exception_during_setup(setup_fail_fixture):
+            pass
+
+        async def test_callback_exception_during_teardown(teardown_fail_fixture):
+            pass
         """
     )
 
-    result = testdir.runpytest('-v', '-p', 'no:curio')
-    result.assert_outcomes(passed=3 * len(get_all_backends()) + 2)
+    result = testdir.runpytest('-v')
+    result.assert_outcomes(passed=2, failed=1, errors=2)
 
 
 def test_autouse_async_fixture(testdir):
@@ -101,7 +170,7 @@ def test_autouse_async_fixture(testdir):
         """
     )
 
-    result = testdir.runpytest('-v', '-p', 'no:curio')
+    result = testdir.runpytest('-v')
     result.assert_outcomes(passed=len(get_all_backends()))
 
 
@@ -116,7 +185,7 @@ def test_cancel_scope_in_asyncgen_fixture(testdir):
         @pytest.fixture
         async def asyncgen_fixture():
             async with create_task_group() as tg:
-                await tg.spawn(tg.cancel_scope.cancel)
+                tg.cancel_scope.cancel()
                 await sleep(1)
 
             yield 1

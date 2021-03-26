@@ -22,6 +22,8 @@ The manual
    signals
    testing
    api
+   migration
+   faq
    support
    contributing
    versionhistory

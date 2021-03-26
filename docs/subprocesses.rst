@@ -24,7 +24,7 @@ To run an external command with one call, use :func:`~run_process`::
 
 
     async def main():
-        result = await run_process('/usr/bin/ps')
+        result = await run_process('ps')
         print(result.stdout.decode())
 
     run(main)
@@ -35,7 +35,7 @@ The snippet above runs the ``ps`` command within a shell (. To run it directly::
 
 
     async def main():
-        result = await run_process(['/usr/bin/ps'])
+        result = await run_process(['ps'])
         print(result.stdout.decode())
 
     run(main)
@@ -51,8 +51,8 @@ with :func:`~open_process`::
 
 
     async def main():
-        async with await open_process(['/usr/bin/ps']) as process:
-            for text in TextReceiveStream(process.stdout):
+        async with await open_process(['ps']) as process:
+            async for text in TextReceiveStream(process.stdout):
                 print(text)
 
     run(main)

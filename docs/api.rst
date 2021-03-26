@@ -33,7 +33,7 @@ Timeouts and cancellation
 .. autofunction:: anyio.fail_after
 .. autofunction:: anyio.current_effective_deadline
 
-.. autoclass:: anyio.abc.CancelScope
+.. autoclass:: anyio.CancelScope
 
 Task groups
 -----------
@@ -41,12 +41,14 @@ Task groups
 .. autofunction:: anyio.create_task_group
 
 .. autoclass:: anyio.abc.TaskGroup
+.. autoclass:: anyio.abc.TaskStatus
 
 Threads
 -------
 
 .. autofunction:: anyio.run_sync_in_worker_thread
 .. autofunction:: anyio.run_async_from_thread
+.. autofunction:: anyio.run_sync_from_thread
 .. autofunction:: anyio.current_default_worker_thread_limiter
 .. autofunction:: anyio.create_blocking_portal
 .. autofunction:: anyio.start_blocking_portal
@@ -85,8 +87,12 @@ Streams and stream wrappers
 .. autodata:: anyio.abc.AnyByteStream
 
 .. autoclass:: anyio.streams.buffered.BufferedByteReceiveStream
+.. autoclass:: anyio.streams.file.FileStreamAttribute
+.. autoclass:: anyio.streams.file.FileReadStream
+.. autoclass:: anyio.streams.file.FileWriteStream
 .. autoclass:: anyio.streams.memory.MemoryObjectReceiveStream
 .. autoclass:: anyio.streams.memory.MemoryObjectSendStream
+.. autoclass:: anyio.streams.memory.MemoryObjectStreamStatistics
 .. autoclass:: anyio.streams.stapled.MultiListener
 .. autoclass:: anyio.streams.stapled.StapledByteStream
 .. autoclass:: anyio.streams.stapled.StapledObjectStream
@@ -128,22 +134,42 @@ Subprocesses
 Synchronization
 ---------------
 
-.. autofunction:: anyio.create_semaphore
-.. autofunction:: anyio.create_lock
-.. autofunction:: anyio.create_event
-.. autofunction:: anyio.create_condition
-.. autofunction:: anyio.create_capacity_limiter
+.. autoclass:: anyio.Event
+.. autoclass:: anyio.Lock
+.. autoclass:: anyio.Condition
+.. autoclass:: anyio.Semaphore
+.. autoclass:: anyio.CapacityLimiter
 
-.. autoclass:: anyio.abc.Semaphore
-.. autoclass:: anyio.abc.Lock
-.. autoclass:: anyio.abc.Event
-.. autoclass:: anyio.abc.Condition
-.. autoclass:: anyio.abc.CapacityLimiter
+.. autoclass:: anyio.LockStatistics
+.. autoclass:: anyio.EventStatistics
+.. autoclass:: anyio.ConditionStatistics
+.. autoclass:: anyio.CapacityLimiterStatistics
+
+.. autofunction:: anyio.create_event
+.. autofunction:: anyio.create_lock
+.. autofunction:: anyio.create_condition
+.. autofunction:: anyio.create_semaphore
+.. autofunction:: anyio.create_capacity_limiter
 
 Operating system signals
 ------------------------
 
 .. autofunction:: anyio.open_signal_receiver
+
+Low level operations
+--------------------
+
+.. autofunction:: anyio.lowlevel.checkpoint
+.. autofunction:: anyio.lowlevel.checkpoint_if_cancelled
+.. autofunction:: anyio.lowlevel.cancel_shielded_checkpoint
+
+.. autoclass:: anyio.lowlevel.RunVar
+
+Compatibility
+-------------
+
+.. autofunction:: anyio.maybe_async
+.. autofunction:: anyio.maybe_async_cm
 
 Testing and debugging
 ---------------------

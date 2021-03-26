@@ -7,7 +7,9 @@ from typing import Any, Callable, Coroutine, Dict, Generator, Optional, Tuple, T
 import sniffio
 
 # This must be updated when new backends are introduced
-BACKENDS = 'asyncio', 'curio', 'trio'
+from anyio._core._compat import DeprecatedAwaitableFloat
+
+BACKENDS = 'asyncio', 'trio'
 
 T_Retval = TypeVar('T_Retval', covariant=True)
 threadlocals = threading.local()
@@ -22,9 +24,10 @@ def run(func: Callable[..., Coroutine[Any, Any, T_Retval]], *args,
 
     :param func: a coroutine function
     :param args: positional arguments to ``func``
-    :param backend: name of the asynchronous event loop implementation – one of ``asyncio``,
-        ``curio`` and ``trio``
+    :param backend: name of the asynchronous event loop implementation – currently either
+        ``asyncio`` or ``trio``
     :param backend_options: keyword arguments to call the backend ``run()`` implementation with
+        (documented :ref:`here <backend options>`)
     :return: the return value of the coroutine function
     :raises RuntimeError: if an asynchronous event loop is already running in this thread
     :raises LookupError: if the named backend is not found
@@ -65,14 +68,14 @@ async def sleep(delay: float) -> None:
     return await get_asynclib().sleep(delay)
 
 
-async def current_time() -> float:
+def current_time() -> DeprecatedAwaitableFloat:
     """
     Return the current value of the event loop's internal clock.
 
     :return: the clock value (seconds)
 
     """
-    return await get_asynclib().current_time()
+    return DeprecatedAwaitableFloat(get_asynclib().current_time(), current_time)
 
 
 def get_all_backends() -> Tuple[str, ...]:

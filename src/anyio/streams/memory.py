@@ -1,15 +1,23 @@
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
-from typing import Deque, Generic, List, TypeVar
+from typing import Deque, Generic, List, NamedTuple, TypeVar
 
 from .. import (
     BrokenResourceError, ClosedResourceError, EndOfStream, WouldBlock, get_cancelled_exc_class)
-from .._core._lowlevel import checkpoint
-from .._core._synchronization import create_event
-from ..abc.streams import ObjectReceiveStream, ObjectSendStream
-from ..abc.synchronization import Event
+from .._core._compat import DeprecatedAwaitable
+from ..abc import Event, ObjectReceiveStream, ObjectSendStream
+from ..lowlevel import checkpoint
 
 T_Item = TypeVar('T_Item')
+
+
+class MemoryObjectStreamStatistics(NamedTuple):
+    current_buffer_used: int
+    max_buffer_size: float
+    open_send_streams: int
+    open_receive_streams: int
+    tasks_waiting_send: int
+    tasks_waiting_receive: int
 
 
 @dataclass
@@ -22,6 +30,11 @@ class MemoryObjectStreamState(Generic[T_Item]):
                                                                   default_factory=OrderedDict)
     waiting_senders: 'OrderedDict[Event, T_Item]' = field(init=False, default_factory=OrderedDict)
 
+    def statistics(self) -> MemoryObjectStreamStatistics:
+        return MemoryObjectStreamStatistics(
+            len(self.buffer), self.max_buffer_size, self.open_send_channels,
+            self.open_receive_channels, len(self.waiting_senders), len(self.waiting_receivers))
+
 
 @dataclass
 class MemoryObjectReceiveStream(Generic[T_Item], ObjectReceiveStream[T_Item]):
@@ -31,7 +44,7 @@ class MemoryObjectReceiveStream(Generic[T_Item], ObjectReceiveStream[T_Item]):
     def __post_init__(self):
         self._state.open_receive_channels += 1
 
-    async def receive_nowait(self) -> T_Item:
+    def receive_nowait(self) -> T_Item:
         """
         Receive the next item if it can be done without waiting.
 
@@ -50,7 +63,7 @@ class MemoryObjectReceiveStream(Generic[T_Item], ObjectReceiveStream[T_Item]):
             # Get the item from the next sender
             send_event, item = self._state.waiting_senders.popitem(last=False)
             self._state.buffer.append(item)
-            await send_event.set()
+            send_event.set()
 
         if self._state.buffer:
             return self._state.buffer.popleft()
@@ -62,10 +75,10 @@ class MemoryObjectReceiveStream(Generic[T_Item], ObjectReceiveStream[T_Item]):
     async def receive(self) -> T_Item:
         await checkpoint()
         try:
-            return await self.receive_nowait()
+            return self.receive_nowait()
         except WouldBlock:
             # Add ourselves in the queue
-            receive_event = create_event()
+            receive_event = Event()
             container: List[T_Item] = []
             self._state.waiting_receivers[receive_event] = container
 
@@ -105,9 +118,16 @@ class MemoryObjectReceiveStream(Generic[T_Item], ObjectReceiveStream[T_Item]):
             self._state.open_receive_channels -= 1
             if self._state.open_receive_channels == 0:
                 send_events = list(self._state.waiting_senders.keys())
-                self._state.waiting_senders.clear()
                 for event in send_events:
-                    await event.set()
+                    event.set()
+
+    def statistics(self) -> MemoryObjectStreamStatistics:
+        """
+        Return statistics about the current state of this stream.
+
+        .. versionadded:: 3.0
+        """
+        return self._state.statistics()
 
 
 @dataclass
@@ -118,7 +138,7 @@ class MemoryObjectSendStream(Generic[T_Item], ObjectSendStream[T_Item]):
     def __post_init__(self):
         self._state.open_send_channels += 1
 
-    async def send_nowait(self, item: T_Item) -> None:
+    def send_nowait(self, item: T_Item) -> DeprecatedAwaitable:
         """
         Send an item immediately if it can be done without waiting.
 
@@ -138,19 +158,21 @@ class MemoryObjectSendStream(Generic[T_Item], ObjectSendStream[T_Item]):
         if self._state.waiting_receivers:
             receive_event, container = self._state.waiting_receivers.popitem(last=False)
             container.append(item)
-            await receive_event.set()
+            receive_event.set()
         elif len(self._state.buffer) < self._state.max_buffer_size:
             self._state.buffer.append(item)
         else:
             raise WouldBlock
 
+        return DeprecatedAwaitable(self.send_nowait)
+
     async def send(self, item: T_Item) -> None:
         await checkpoint()
         try:
-            await self.send_nowait(item)
+            self.send_nowait(item)
         except WouldBlock:
             # Wait until there's someone on the receiving end
-            send_event = create_event()
+            send_event = Event()
             self._state.waiting_senders[send_event] = item
             try:
                 await send_event.wait()
@@ -158,7 +180,7 @@ class MemoryObjectSendStream(Generic[T_Item], ObjectSendStream[T_Item]):
                 self._state.waiting_senders.pop(send_event, None)  # type: ignore[arg-type]
                 raise
 
-            if not self._state.open_receive_channels:
+            if self._state.waiting_senders.pop(send_event, None):  # type: ignore[arg-type]
                 raise BrokenResourceError
 
     def clone(self) -> 'MemoryObjectSendStream':
@@ -184,4 +206,12 @@ class MemoryObjectSendStream(Generic[T_Item], ObjectSendStream[T_Item]):
                 receive_events = list(self._state.waiting_receivers.keys())
                 self._state.waiting_receivers.clear()
                 for event in receive_events:
-                    await event.set()
+                    event.set()
+
+    def statistics(self) -> MemoryObjectStreamStatistics:
+        """
+        Return statistics about the current state of this stream.
+
+        .. versionadded:: 3.0
+        """
+        return self._state.statistics()

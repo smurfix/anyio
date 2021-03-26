@@ -3,6 +3,124 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
+**UNRELEASED**
+
+- **BACKWARDS INCOMPATIBLE** Submodules under ``anyio.abc.`` have been made private (use only
+  ``anyio.abc`` from now on).
+- **BACKWARDS INCOMPATIBLE** The following functions/methods were previously coroutine
+  functions/methods and have been converted into synchronous ones:
+
+  * ``MemoryObjectReceiveStream.receive_nowait()``
+
+  The following functions and methods are no longer asynchronous but can still be awaited on (doing
+  so will emit a deprecation warning):
+
+  * ``current_time()``
+  * ``current_effective_deadline()``
+  * ``get_current_task()``
+  * ``get_running_tasks()``
+  * ``CancelScope.cancel()``
+  * ``CapacityLimiter.acquire_nowait()``
+  * ``CapacityLimiter.acquire_on_behalf_of_nowait()``
+  * ``Condition.release()``
+  * ``Event.set()``
+  * ``Lock.release()``
+  * ``MemoryObjectSendStream.send_nowait()``
+  * ``Semaphore.release()``
+  * ``TaskGroup.spawn()``
+
+  Likewise, the following functions now return synchronous context managers instead of asynchronous
+  context managers (and emit deprecation warnings if used as async context managers):
+
+  * ``fail_after()``
+  * ``move_on_after()``
+  * ``open_cancel_scope()`` (now just ``CancelScope()``; see below)
+  * ``open_signal_receiver()``
+
+  See the :doc:`migration documentation <migration>` for instructions on how to deal with these
+  changes.
+- The following functions and methods have been deprecated:
+
+  * ``create_capacity_limiter()`` → ``anyio.Event()``
+  * ``create_event()`` → ``anyio.Event()``
+  * ``create_lock()`` → ``anyio.Lock()``
+  * ``create_condition()`` → ``anyio.Condition()``
+  * ``create_semaphore()`` → ``anyio.Semaphore()``
+  * ``open_cancel_scope()`` → ``anyio.CancelScope()``
+  * ``CapacityLimiter.set_total_tokens()`` → ``limiter.total_tokens = ...``
+- **BACKWARDS INCOMPATIBLE** The ``CapacityLimiter.set_total_tokens()`` method has been removed in
+  exchange of making the ``total_tokens`` property writable
+- **BACKWARDS INCOMPATIBLE** ``start_blocking_portal()`` must now be used as a context manager (it
+  no longer returns a BlockingPortal, but a context manager that yields one)
+- **BACKWARDS INCOMPATIBLE** Removed the ``BlockingPortal.stop_from_external_thread()`` method
+  (do ``portal.call(portal.stop)`` instead now)
+- **BACKWARDS INCOMPATIBLE** ``Lock`` and ``Condition`` can now only be released by the task that
+  acquired them. This behavior is now consistent on all backends whereas previously only Trio
+  enforced this.
+- **BACKWARDS INCOMPATIBLE** The ``SocketStream`` and ``SocketListener`` classes were made
+  non-generic
+- Dropped Curio as a backend (see the :doc:`FAQ <faq>` as for why)
+- Added the ``run_sync_from_thread()`` function
+- Added ``UNIXSocketStream`` as a ``SocketStream`` subclass, capable of sending and receiving
+  file descriptors
+- Added thread pooling for asyncio
+- Added the ``FileReadStream`` and ``FileWriteStream`` classes
+- Added the ``TaskGroup.start()`` method and a corresponding ``BlockingPortal.start_task()`` method
+- Added the ``name`` argument to ``BlockingPortal.spawn_task()``
+- Added the ``max_value`` property to ``Semaphore``
+- Added the ``Lock.acquire_nowait()``, ``Condition.acquire_nowait()`` and
+  ``Semaphore.acquire_nowait()`` methods
+- Added the ``statistics()`` method to ``Event``, ``Lock``, ``Condition``, ``Semaphore``,
+  ``CapacityLimiter``, ``MemoryObjectReceiveStream`` and ``MemoryObjectSendStream``
+- Added the ``anyio.lowlevel`` module containing:
+
+  * The ``checkpoint()`` function
+  * The ``checkpoint_if_cancelled()`` function
+  * The ``cancel_shielded_checkpoint()`` function
+  * The ``RunVar()`` class
+- Fixed ``current_effective_deadline()`` raising ``KeyError`` on asyncio when no cancel scope is
+  active
+- Changed ``CancelScope.deadline`` to be writable
+- ``Lock`` and ``Condition`` can now only be released by the task that acquired them. This behavior
+  is now consistent on all backends whereas previously only Trio enforced this.
+- Changed the asyncio test runner to capture unhandled exceptions from asynchronous callbacks and
+  unbound native tasks which are then raised after the test function (or async fixture setup or
+  teardown) completes
+- Changed the asyncio ``TaskGroup.spawn()`` method to call the target function immediately before
+  spawning the task, for consistency across backends
+- Changed the asyncio ``TaskGroup.spawn()`` method to avoid the use of a coroutine wrapper on
+  Python 3.8+ and added a hint for hiding the wrapper in tracebacks on earlier Pythons (supported
+  by Pytest, Sentry etc.)
+- Changed the default thread limiter on asyncio to be scoped to an event loop so that multiple
+  running event loops don't conflict with each other
+
+**2.2.0**
+
+- Added the ``maybe_async()`` and ``maybe_async_cm()`` functions to facilitate forward
+  compatibility with AnyIO 3
+- Fixed socket stream bug on asyncio where receiving a half-close from the peer would shut down the
+  entire connection
+- Fixed native task names not being set on asyncio on Python 3.8+
+- Fixed ``TLSStream.send_eof()`` raising ``ValueError`` instead of the expected
+  ``NotImplementedError``
+- Fixed ``open_signal_receiver()`` on asyncio and curio hanging if the cancel scope was cancelled
+  before the function could run
+- Fixed Trio test runner causing unwarranted test errors on ``BaseException``
+  (PR by Matthias Urlichs)
+- Fixed formatted output of ``ExceptionGroup`` containing too many newlines
+
+**2.1.0**
+
+- Added the ``spawn_task()`` and ``wrap_async_context_manager()`` methods to ``BlockingPortal``
+- Added the ``handshake_timeout`` and ``error_handler`` parameters to ``TLSListener``
+- Fixed ``Event`` objects on the trio backend not inheriting from ``anyio.abc.Event``
+- Fixed ``run_sync_in_worker_thread()`` raising ``UnboundLocalError`` on asyncio when cancelled
+- Fixed ``send()`` on socket streams not raising any exception on asyncio, and an unwrapped
+  ``BrokenPipeError`` on trio and curio when the peer has disconnected
+- Fixed ``MemoryObjectSendStream.send()`` raising ``BrokenResourceError`` when the last receiver is
+  closed right after receiving the item
+- Fixed ``ValueError: Invalid file descriptor: -1`` when closing a ``SocketListener`` on asyncio
+
 **2.0.2**
 
 - Fixed one more case of

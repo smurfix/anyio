@@ -17,7 +17,7 @@ another task frees it.
 
 Example::
 
-    from anyio import create_task_group, create_semaphore, sleep, run
+    from anyio import Semaphore, create_task_group, sleep, run
 
 
     async def use_resource(tasknum, semaphore):
@@ -27,10 +27,10 @@ Example::
 
 
     async def main():
-        semaphore = create_semaphore(2)
+        semaphore = Semaphore(2)
         async with create_task_group() as tg:
             for num in range(10):
-                await tg.spawn(use_resource, num, semaphore)
+                tg.spawn(use_resource, num, semaphore)
 
     run(main)
 
@@ -42,7 +42,7 @@ They function much like semaphores with a maximum value of 1.
 
 Example::
 
-    from anyio import create_task_group, create_lock, sleep, run
+    from anyio import Lock, create_task_group, sleep, run
 
 
     async def use_resource(tasknum, lock):
@@ -52,10 +52,10 @@ Example::
 
 
     async def main():
-        lock = create_lock()
+        lock = Lock()
         async with create_task_group() as tg:
             for num in range(4):
-                await tg.spawn(use_resource, num, lock)
+                tg.spawn(use_resource, num, lock)
 
     run(main)
 
@@ -64,25 +64,29 @@ Events
 
 Events are used to notify tasks that something they've been waiting to happen has happened.
 An event object can have multiple listeners and they are all notified when the event is triggered.
-Events can also be reused by clearing the triggered state.
 
 Example::
 
-    from anyio import create_task_group, create_event, run
+    from anyio import Event, create_task_group, run
 
 
     async def notify(event):
-        await event.set()
+        event.set()
 
 
     async def main():
-        event = create_event()
+        event = Event()
         async with create_task_group() as tg:
-            await tg.spawn(notify, event)
+            tg.spawn(notify, event)
             await event.wait()
             print('Received notification!')
 
     run(main)
+
+.. note:: Unlike standard library Events, AnyIO events cannot be reused, and must be replaced
+          instead. This practice prevents a class of race conditions, and matches the semantics
+          of the trio library.
+
 
 Conditions
 ----------
@@ -94,7 +98,7 @@ all of them.
 
 Example::
 
-    from anyio import create_task_group, create_condition, sleep, run
+    from anyio import Condition, create_task_group, sleep, run
 
 
     async def listen(tasknum, condition):
@@ -104,10 +108,10 @@ Example::
 
 
     async def main():
-        condition = create_condition()
+        condition = Condition()
         async with create_task_group() as tg:
             for tasknum in range(6):
-                await tg.spawn(listen, tasknum, condition)
+                tg.spawn(listen, tasknum, condition)
 
             await sleep(1)
             async with condition:
@@ -132,7 +136,7 @@ arbitrary object, so long as that object is hashable.
 
 Example::
 
-    from anyio import create_task_group, create_capacity_limiter, sleep, run
+    from anyio import CapacityLimiter, create_task_group, sleep, run
 
 
     async def use_resource(tasknum, limiter):
@@ -142,12 +146,12 @@ Example::
 
 
     async def main():
-        limiter = create_capacity_limiter(2)
+        limiter = CapacityLimiter(2)
         async with create_task_group() as tg:
             for num in range(10):
-                await tg.spawn(use_resource, num, limiter)
+                tg.spawn(use_resource, num, limiter)
 
     run(main)
 
-To adjust the number of total tokens, you can use the
-:meth:`~.abc.CapacityLimiter.set_total_tokens` method.
+You can adjust the total number of tokens by setting a different value on the limiter's
+``total_tokens`` property.

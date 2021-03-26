@@ -16,7 +16,7 @@ AnyIO provides a simple mechanism for you to receive the signals you're interest
 
 
     async def main():
-        async with open_signal_receiver(signal.SIGTERM, signal.SIGHUP) as signals:
+        with open_signal_receiver(signal.SIGTERM, signal.SIGHUP) as signals:
             async for signum in signals:
                 if signum == signal.SIGTERM:
                     return
@@ -36,8 +36,8 @@ Handling KeyboardInterrupt and SystemExit
 
 By default, different backends handle the Ctrl+C (or Ctrl+Break on Windows) key combination and
 external termination (:exc:`KeyboardInterrupt` and :exc:`SystemExit`, respectively) differently:
-trio raises the relevant exception inside the application while asyncio and curio shut down all the
-tasks and exit. If you need to do your own cleanup in these situations, you will need to install a
+trio raises the relevant exception inside the application while asyncio shuts down all the tasks
+and exits. If you need to do your own cleanup in these situations, you will need to install a
 signal handler::
 
     import signal
@@ -47,20 +47,20 @@ signal handler::
 
 
     async def signal_handler(scope: CancelScope):
-        async with open_signal_receiver(signal.SIGINT, signal.SIGTERM) as signals:
+        with open_signal_receiver(signal.SIGINT, signal.SIGTERM) as signals:
             async for signum in signals:
                 if signum == signal.SIGINT:
                     print('Ctrl+C pressed!')
                 else:
                     print('Terminated!')
 
-                await scope.cancel()
+                scope.cancel()
                 return
 
 
     async def main():
         async with create_task_group() as tg:
-            await tg.spawn(signal_handler, tg.cancel_scope)
+            tg.spawn(signal_handler, tg.cancel_scope)
             ...  # proceed with starting the actual application logic
 
     run(main)

@@ -3,8 +3,8 @@ from typing import Any, Callable, Generic, Optional, TypeVar, Union
 
 from .._core._exceptions import EndOfStream
 from .._core._typedattr import TypedAttributeProvider
-from .resources import AsyncResource
-from .tasks import TaskGroup
+from ._resources import AsyncResource
+from ._tasks import TaskGroup
 
 T_Item = TypeVar('T_Item')
 T_Stream = TypeVar('T_Stream')
@@ -64,7 +64,7 @@ class UnreliableObjectSendStream(Generic[T_Item], AsyncResource, TypedAttributeP
         """
 
 
-class UnreliableObjectStream(Generic[T_Item], UnreliableObjectReceiveStream[T_Item],
+class UnreliableObjectStream(UnreliableObjectReceiveStream[T_Item],
                              UnreliableObjectSendStream[T_Item]):
     """
     A bidirectional message stream which does not guarantee the order or reliability of message
@@ -72,21 +72,21 @@ class UnreliableObjectStream(Generic[T_Item], UnreliableObjectReceiveStream[T_It
     """
 
 
-class ObjectReceiveStream(Generic[T_Item], UnreliableObjectReceiveStream[T_Item]):
+class ObjectReceiveStream(UnreliableObjectReceiveStream[T_Item]):
     """
     A receive message stream which guarantees that messages are received in the same order in
     which they were sent, and that no messages are missed.
     """
 
 
-class ObjectSendStream(Generic[T_Item], UnreliableObjectSendStream[T_Item]):
+class ObjectSendStream(UnreliableObjectSendStream[T_Item]):
     """
     A send message stream which guarantees that messages are delivered in the same order in which
     they were sent, without missing any messages in the middle.
     """
 
 
-class ObjectStream(Generic[T_Item], ObjectReceiveStream[T_Item], ObjectSendStream[T_Item],
+class ObjectStream(ObjectReceiveStream[T_Item], ObjectSendStream[T_Item],
                    UnreliableObjectStream[T_Item]):
     """
     A bidirectional message stream which guarantees the order and reliability of message delivery.
