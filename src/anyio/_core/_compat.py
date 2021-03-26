@@ -68,9 +68,7 @@ class DeprecatedAwaitable:
         self._name = f'{func.__module__}.{func.__qualname__}'
 
     def __await__(self):
-        warn(f'Awaiting on {self._name}() is deprecated. Use "await '
-             f'anyio.maybe_awaitable({self._name}(...)) if you have to support both AnyIO 2.x and '
-             f'3.x, or just remove the "await" if you are completely migrating to AnyIO 3+.',
+        warn(f'Awaiting on {self._name}() is deprecated.',
              DeprecationWarning)
         if False:
             yield
@@ -84,9 +82,7 @@ class DeprecatedAwaitableFloat(float):
         self._name = f'{func.__module__}.{func.__qualname__}'
 
     def __await__(self):
-        warn(f'Awaiting on {self._name}() is deprecated. Use "await '
-             f'anyio.maybe_awaitable({self._name}(...)) if you have to support both AnyIO 2.x and '
-             f'3.x, or just remove the "await" if you are completely migrating to AnyIO 3+.',
+        warn(f'Awaiting on {self._name}() is deprecated.',
              DeprecationWarning)
         if False:
             yield
@@ -114,10 +110,8 @@ class DeprecatedAsyncContextManager(metaclass=ABCMeta):
         pass
 
     async def __aenter__(self) -> T:
-        warn(f'Using {self.__class__.__name__} as an async context manager has been deprecated. '
-             f'Use "async with anyio.maybe_async_cm(yourcontextmanager) as foo:" if you have to '
-             f'support both AnyIO 2.x and 3.x, or just remove the "async" from "async with" if '
-             f'you are completely migrating to AnyIO 3+.', DeprecationWarning)
+        warn(f'Using {self.__class__.__name__} as an async context manager is deprecated.',
+             DeprecationWarning)
         return self.__enter__()
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> Optional[bool]:

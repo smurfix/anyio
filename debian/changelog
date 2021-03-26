@@ -1,3 +1,9 @@
+anyio (3.0.0-2) smurf; urgency=medium
+
+  * Shorten deprecation warnings.
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Fri, 26 Mar 2021 10:03:57 +0100
+
 anyio (3.0.0-1) smurf; urgency=medium
 
   * Upstream merge of v3. Almost done.
