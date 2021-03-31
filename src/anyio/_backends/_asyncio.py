@@ -263,16 +263,26 @@ class CancelScope(BaseCancelScope, DeprecatedAsyncContextManager):
 
     def __exit__(self, exc_type: Optional[Type[BaseException]], exc_val: Optional[BaseException],
                  exc_tb: Optional[TracebackType]) -> Optional[bool]:
+        if not self._active:
+            raise RuntimeError('This cancel scope is not active')
+        if current_task() is not self._host_task:
+            raise RuntimeError('Attempted to exit cancel scope in a different task than it was '
+                               'entered in')
+
+        assert self._host_task is not None
+        host_task_state = _task_states.get(self._host_task)
+        if host_task_state is None or host_task_state.cancel_scope is not self:
+            raise RuntimeError("Attempted to exit a cancel scope that isn't the current tasks's "
+                               "current cancel scope")
+
         self._active = False
         if self._timeout_handle:
             self._timeout_handle.cancel()
             self._timeout_handle = None
 
-        assert self._host_task is not None
         self._tasks.remove(self._host_task)
-        host_task_state = _task_states.get(self._host_task)
-        if host_task_state is not None and host_task_state.cancel_scope is self:
-            host_task_state.cancel_scope = self._parent_scope
+
+        host_task_state.cancel_scope = self._parent_scope
 
         # Restart the cancellation effort in the nearest directly cancelled parent scope if this
         # one was shielded
@@ -479,8 +489,6 @@ class _AsyncioTaskStatus(abc.TaskStatus):
 
 
 class TaskGroup(abc.TaskGroup):
-    __slots__ = 'cancel_scope', '_active', '_exceptions'
-
     def __init__(self):
         self.cancel_scope: CancelScope = CancelScope()
         self._active = False
@@ -642,7 +650,7 @@ _Retval_Queue_Type = Tuple[Optional[T_Retval], Optional[BaseException]]
 
 
 def _thread_pool_worker(work_queue: Queue, workers: Set[Thread],
-                        idle_workers: Set[Thread]) -> None:
+                        idle_workers: Deque[Thread]) -> None:
     func: Callable
     args: tuple
     future: asyncio.Future
@@ -655,7 +663,10 @@ def _thread_pool_worker(work_queue: Queue, workers: Set[Thread],
             workers.remove(thread)
             return
         finally:
-            idle_workers.discard(thread)
+            try:
+                idle_workers.remove(thread)
+            except ValueError:
+                pass
 
         if func is None:
             # Shutdown command received
@@ -668,21 +679,21 @@ def _thread_pool_worker(work_queue: Queue, workers: Set[Thread],
                 try:
                     result = func(*args)
                 except BaseException as exc:
-                    idle_workers.add(thread)
+                    idle_workers.append(thread)
                     if not loop.is_closed() and not future.cancelled():
                         loop.call_soon_threadsafe(future.set_exception, exc)
                 else:
-                    idle_workers.add(thread)
+                    idle_workers.append(thread)
                     if not loop.is_closed() and not future.cancelled():
                         loop.call_soon_threadsafe(future.set_result, result)
         else:
-            idle_workers.add(thread)
+            idle_workers.append(thread)
 
         work_queue.task_done()
 
 
 _threadpool_work_queue: RunVar[Queue] = RunVar('_threadpool_work_queue')
-_threadpool_idle_workers: RunVar[Set[Thread]] = RunVar('_threadpool_idle_workers')
+_threadpool_idle_workers: RunVar[Deque[Thread]] = RunVar('_threadpool_idle_workers')
 _threadpool_workers: RunVar[Set[Thread]] = RunVar('_threadpool_workers')
 
 
@@ -704,7 +715,7 @@ async def run_sync_in_worker_thread(
         workers = _threadpool_workers.get()
     except LookupError:
         work_queue = Queue()
-        idle_workers = set()
+        idle_workers = deque()
         workers = set()
         _threadpool_work_queue.set(work_queue)
         _threadpool_idle_workers.set(idle_workers)
@@ -748,8 +759,6 @@ def run_async_from_thread(func: Callable[..., Coroutine[Any, Any, T_Retval]], *a
 
 
 class BlockingPortal(abc.BlockingPortal):
-    __slots__ = '_loop'
-
     def __init__(self):
         super().__init__()
         self._loop = get_running_loop()
@@ -765,7 +774,7 @@ class BlockingPortal(abc.BlockingPortal):
 # Subprocesses
 #
 
-@dataclass
+@dataclass(eq=False)
 class StreamReaderWrapper(abc.ByteReceiveStream):
     _stream: asyncio.StreamReader
 
@@ -780,7 +789,7 @@ class StreamReaderWrapper(abc.ByteReceiveStream):
         self._stream.feed_eof()
 
 
-@dataclass
+@dataclass(eq=False)
 class StreamWriterWrapper(abc.ByteSendStream):
     _stream: asyncio.StreamWriter
 
@@ -792,12 +801,12 @@ class StreamWriterWrapper(abc.ByteSendStream):
         self._stream.close()
 
 
-@dataclass
+@dataclass(eq=False)
 class Process(abc.Process):
     _process: asyncio.subprocess.Process
-    _stdin: Optional[abc.ByteSendStream]
-    _stdout: Optional[abc.ByteReceiveStream]
-    _stderr: Optional[abc.ByteReceiveStream]
+    _stdin: Optional[StreamWriterWrapper]
+    _stdout: Optional[StreamReaderWrapper]
+    _stderr: Optional[StreamReaderWrapper]
 
     async def aclose(self) -> None:
         if self._stdin:
@@ -855,6 +864,53 @@ async def open_process(command, *, shell: bool, stdin: int, stdout: int, stderr:
     stdout_stream = StreamReaderWrapper(process.stdout) if process.stdout else None
     stderr_stream = StreamReaderWrapper(process.stderr) if process.stderr else None
     return Process(process, stdin_stream, stdout_stream, stderr_stream)
+
+
+def _forcibly_shutdown_process_pool_on_exit(workers: Set[Process], _task) -> None:
+    """
+    Forcibly shuts down worker processes belonging to this event loop."""
+    child_watcher: Optional[asyncio.AbstractChildWatcher]
+    try:
+        child_watcher = asyncio.get_event_loop_policy().get_child_watcher()
+    except NotImplementedError:
+        child_watcher = None
+
+    # Close as much as possible (w/o async/await) to avoid warnings
+    for process in workers:
+        if process.returncode is None:
+            continue
+
+        process._stdin._stream._transport.close()  # type: ignore
+        process._stdout._stream._transport.close()  # type: ignore
+        process._stderr._stream._transport.close()  # type: ignore
+        process.kill()
+        if child_watcher:
+            child_watcher.remove_child_handler(process.pid)
+
+
+async def _shutdown_process_pool_on_exit(workers: Set[Process]) -> None:
+    """
+    Shuts down worker processes belonging to this event loop.
+
+    NOTE: this only works when the event loop was started using asyncio.run() or anyio.run().
+
+    """
+    process: Process
+    try:
+        await sleep(math.inf)
+    except asyncio.CancelledError:
+        for process in workers:
+            if process.returncode is None:
+                process.kill()
+
+        for process in workers:
+            await process.aclose()
+
+
+def setup_process_pool_exit_at_shutdown(workers: Set[Process]) -> None:
+    kwargs = {'name': 'AnyIO process pool shutdown task'} if _native_task_names else {}
+    create_task(_shutdown_process_pool_on_exit(workers), **kwargs)
+    find_root_task().add_done_callback(partial(_forcibly_shutdown_process_pool_on_exit, workers))
 
 
 #

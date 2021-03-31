@@ -849,3 +849,38 @@ async def test_shielded_cancel_sleep_time():
             process_time = time.process_time()
 
         assert (time.process_time() - process_time) < hang_time
+
+
+async def test_cancelscope_wrong_exit_order():
+    """
+    Test that a RuntimeError is raised if the task tries to exit cancel scopes in the wrong order.
+
+    """
+    scope1 = CancelScope()
+    scope2 = CancelScope()
+    scope1.__enter__()
+    scope2.__enter__()
+    pytest.raises(RuntimeError, scope1.__exit__, None, None, None)
+
+
+async def test_cancelscope_exit_before_enter():
+    """Test that a RuntimeError is raised if one tries to exit a cancel scope before entering."""
+    scope = CancelScope()
+    pytest.raises(RuntimeError, scope.__exit__, None, None, None)
+
+
+@pytest.mark.parametrize('anyio_backend', ['asyncio'])  # trio does not check for this yet
+async def test_cancelscope_exit_in_wrong_task():
+    async def enter_scope(scope):
+        scope.__enter__()
+
+    async def exit_scope(scope):
+        scope.__exit__(None, None, None)
+
+    scope = CancelScope()
+    async with create_task_group() as tg:
+        tg.spawn(enter_scope, scope)
+
+    with pytest.raises(RuntimeError):
+        async with create_task_group() as tg:
+            tg.spawn(exit_scope, scope)

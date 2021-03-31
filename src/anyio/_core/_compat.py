@@ -1,36 +1,44 @@
 from abc import ABCMeta, abstractmethod
 from contextlib import AbstractContextManager
 from typing import (
-    Any, AsyncContextManager, Callable, ContextManager, Coroutine, List, Optional, TypeVar, Union,
-    overload)
+    AsyncContextManager, Callable, ContextManager, List, Optional, TypeVar, Union, overload)
 from warnings import warn
 
 T = TypeVar('T')
+AnyDeprecatedAwaitable = Union['DeprecatedAwaitable', 'DeprecatedAwaitableFloat',
+                               'DeprecatedAwaitableList']
 
 
 @overload
-async def maybe_async(__obj: Coroutine[Any, Any, T]) -> T:
+async def maybe_async(__obj: 'DeprecatedAwaitableFloat') -> float:
     ...
 
 
 @overload
-async def maybe_async(__obj: T) -> T:
+async def maybe_async(__obj: 'DeprecatedAwaitableList') -> list:
     ...
 
 
-async def maybe_async(__obj):
+@overload
+async def maybe_async(__obj: 'DeprecatedAwaitable') -> None:
+    ...
+
+
+async def maybe_async(__obj: AnyDeprecatedAwaitable) -> Union[float, list, None]:
     """
     Await on the given object if necessary.
 
     This function is intended to bridge the gap between AnyIO 2.x and 3.x where some functions and
     methods were converted from coroutine functions into regular functions.
 
+    Do **not** try to use this for any other purpose!
+
     :return: the result of awaiting on the object if coroutine, or the object itself otherwise
 
     .. versionadded:: 2.2
 
     """
-    return __obj
+    return __obj._unwrap()
 
 
 class _ContextManagerWrapper:
@@ -63,15 +71,21 @@ def maybe_async_cm(cm: Union[ContextManager[T], AsyncContextManager[T]]) -> Asyn
     return _ContextManagerWrapper(cm)
 
 
+def _warn_deprecation(awaitable: AnyDeprecatedAwaitable) -> None:
+    warn(f'Awaiting on {awaitable._name}() is deprecated.', DeprecationWarning)
+
+
 class DeprecatedAwaitable:
     def __init__(self, func: Callable[..., 'DeprecatedAwaitable']):
         self._name = f'{func.__module__}.{func.__qualname__}'
 
     def __await__(self):
-        warn(f'Awaiting on {self._name}() is deprecated.',
-             DeprecationWarning)
+        _warn_deprecation(self)
         if False:
             yield
+
+    def _unwrap(self):
+        return None
 
 
 class DeprecatedAwaitableFloat(float):
@@ -82,22 +96,30 @@ class DeprecatedAwaitableFloat(float):
         self._name = f'{func.__module__}.{func.__qualname__}'
 
     def __await__(self):
-        warn(f'Awaiting on {self._name}() is deprecated.',
-             DeprecationWarning)
+        _warn_deprecation(self)
         if False:
             yield
 
         return float(self)
 
+    def _unwrap(self) -> float:
+        return float(self)
 
-class DeprecatedAwaitableList(List[T], DeprecatedAwaitable):
+
+class DeprecatedAwaitableList(List[T]):
     def __init__(self, *args, func: Callable[..., 'DeprecatedAwaitableList']):
-        list.__init__(self, *args)
-        DeprecatedAwaitable.__init__(self, func)
+        super().__init__(*args)
+        self._name = f'{func.__module__}.{func.__qualname__}'
 
     def __await__(self):
-        yield from super().__await__()
+        _warn_deprecation(self)
+        if False:
+            yield
+
         return self
+
+    def _unwrap(self) -> List[T]:
+        return list(self)
 
 
 class DeprecatedAsyncContextManager(metaclass=ABCMeta):

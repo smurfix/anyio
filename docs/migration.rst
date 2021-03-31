@@ -35,11 +35,19 @@ The following functions and methods were changed:
 
 When migrating to AnyIO 3, simply remove the ``await`` from each call to these.
 
+.. note:: For backwards compatibility reasons, :func:`current_time`,
+          :func:`current_effective_deadline` and :func:`get_running_tasks` return objects which are
+          awaitable versions of their original types (:class:`float` and :class:`list`,
+          respectively). These awaitable versions are subclasses of the original types so they
+          should behave as their originals, but if you absolutely need the pristine original types,
+          you can either use :func:`maybe_async` or ``float()`` / ``list()`` on the returned
+          value as appropriate.
+
 The following async context managers changed to regular context managers:
 
 * :func:`fail_after`
 * :func:`move_on_after`
-* :func:`open_cancel_scope`
+* :func:`open_cancel_scope` (now just ``CancelScope()``)
 
 When migrating, just change ``async with`` into a plain ``with``.
 
@@ -102,3 +110,16 @@ or, if you need to work with both AnyIO 2 and 3::
 
     async def foo() -> Event:
         return create_event()
+
+Threading functions moved
+-------------------------
+
+Threading functions were restructured to submodules, following the example of trio:
+
+* ``current_default_worker_thread_limiter`` → :func:`.to_thread.current_default_thread_limiter`
+  (NOTE: the function was renamed too!)
+* ``run_sync_in_worker_thread()`` → :func:`.to_thread.run_sync`
+* ``run_async_from_thread()`` → :func:`.from_thread.run`
+* ``run_sync_from_thread()`` → :func:`.from_thread.run_sync`
+
+The old versions are still in place but emit deprecation warnings when called.
