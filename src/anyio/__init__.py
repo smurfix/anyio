@@ -51,3 +51,6 @@ from .from_thread import (
 for key, value in list(locals().items()):
     if getattr(value, '__module__', '').startswith('anyio.'):
         value.__module__ = __name__
+
+# compatibility stuff
+from ._core._compat import DeprecatedAwaitable, DeprecatedAsyncContextManager
