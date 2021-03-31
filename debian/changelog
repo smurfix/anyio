@@ -1,8 +1,9 @@
 anyio (3.0.0-3) smurf; urgency=medium
 
   * Merge to RC3.
+  * Compat level 13.
 
- -- Matthias Urlichs <matthias@urlichs.de>  Wed, 31 Mar 2021 10:01:37 +0200
+ -- Matthias Urlichs <matthias@urlichs.de>  Wed, 31 Mar 2021 10:01:38 +0200
 
 anyio (3.0.0-2) smurf; urgency=medium
 
