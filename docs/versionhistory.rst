@@ -3,6 +3,20 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
+**UNRELEASED**
+
+- Fixed race condition in asyncio thread pooling that interfered with worker idleness detection
+- Fixed ``DeprecatedAwaitable*`` types being unpickleable
+
+**3.0.0rc4**
+
+- Fixed ``Semaphore.acquire()`` raising ``WouldBlock`` when a race condition occurs
+- Changed ``TaskGroup.spawn()`` back into a coroutine function and added
+  ``TaskGroup.start_soon`` as the replacement
+- Renamed ``BlockingPortal.spawn_task`` into ``BlockingPortal.start_task_soon``
+- Deprecated ``create_blocking_portal`` in favor of instantiating ``BlockingPortal``
+  directly
+
 **3.0.0rc3**
 
 - The following functions and methods have been moved:

@@ -12,9 +12,9 @@ from functools import partial, wraps
 from inspect import (
     CORO_RUNNING, CORO_SUSPENDED, GEN_RUNNING, GEN_SUSPENDED, getcoroutinestate, getgeneratorstate)
 from io import IOBase
-from queue import Empty, Queue
+from queue import Queue
 from socket import AddressFamily, SocketKind, SocketType
-from threading import Thread, current_thread
+from threading import Thread
 from types import TracebackType
 from typing import (
     Any, Awaitable, Callable, Collection, Coroutine, Deque, Dict, Generator, List, Optional,
@@ -141,6 +141,8 @@ T_Retval = TypeVar('T_Retval')
 
 # Check whether there is native support for task names in asyncio (3.8+)
 _native_task_names = hasattr(asyncio.Task, 'get_name')
+
+WORKER_THREAD_MAX_IDLE_TIME = 10  # seconds
 
 
 def get_callable_name(func: Callable) -> str:
@@ -594,7 +596,7 @@ class TaskGroup(abc.TaskGroup):
                     RuntimeError('Child exited without calling task_status.started()'))
 
         if not self._active:
-            raise RuntimeError('This task group is not active; no new tasks can be spawned.')
+            raise RuntimeError('This task group is not active; no new tasks can be started.')
 
         options = {}
         name = name or get_callable_name(func)
@@ -623,9 +625,8 @@ class TaskGroup(abc.TaskGroup):
         self.cancel_scope._tasks.add(task)
         return task
 
-    def spawn(self, func: Callable[..., Coroutine], *args, name=None) -> DeprecatedAwaitable:
+    def start_soon(self, func: Callable[..., Coroutine], *args, name=None) -> None:
         self._spawn(func, args, name)
-        return DeprecatedAwaitable(self.spawn)
 
     async def start(self, func: Callable[..., Coroutine], *args, name=None) -> None:
         future: asyncio.Future = asyncio.Future()
@@ -649,51 +650,34 @@ class TaskGroup(abc.TaskGroup):
 _Retval_Queue_Type = Tuple[Optional[T_Retval], Optional[BaseException]]
 
 
-def _thread_pool_worker(work_queue: Queue, workers: Set[Thread],
-                        idle_workers: Deque[Thread]) -> None:
+def _thread_pool_worker(work_queue: Queue, loop: asyncio.AbstractEventLoop) -> None:
     func: Callable
     args: tuple
     future: asyncio.Future
-    limiter: CapacityLimiter
-    thread = current_thread()
-    while True:
-        try:
-            func, args, future = work_queue.get(timeout=10)
-        except Empty:
-            workers.remove(thread)
-            return
-        finally:
-            try:
-                idle_workers.remove(thread)
-            except ValueError:
-                pass
+    with claim_worker_thread('asyncio'):
+        loop = threadlocals.loop = loop
+        while True:
+            func, args, future = work_queue.get()
+            if func is None:
+                # Shutdown command received
+                return
 
-        if func is None:
-            # Shutdown command received
-            workers.remove(thread)
-            return
-
-        if not future.cancelled():
-            with claim_worker_thread('asyncio'):
-                loop = threadlocals.loop = future._loop
+            if not future.cancelled():
                 try:
                     result = func(*args)
                 except BaseException as exc:
-                    idle_workers.append(thread)
                     if not loop.is_closed() and not future.cancelled():
                         loop.call_soon_threadsafe(future.set_exception, exc)
                 else:
-                    idle_workers.append(thread)
                     if not loop.is_closed() and not future.cancelled():
                         loop.call_soon_threadsafe(future.set_result, result)
-        else:
-            idle_workers.append(thread)
 
-        work_queue.task_done()
+            work_queue.task_done()
 
 
 _threadpool_work_queue: RunVar[Queue] = RunVar('_threadpool_work_queue')
-_threadpool_idle_workers: RunVar[Deque[Thread]] = RunVar('_threadpool_idle_workers')
+_threadpool_idle_workers: RunVar[Deque[Tuple[Thread, float]]] = RunVar(
+    '_threadpool_idle_workers')
 _threadpool_workers: RunVar[Set[Thread]] = RunVar('_threadpool_workers')
 
 
@@ -727,12 +711,28 @@ async def run_sync_in_worker_thread(
             future: asyncio.Future = asyncio.Future()
             work_queue.put_nowait((func, args, future))
             if not idle_workers:
-                args = (work_queue, workers, idle_workers)
-                thread = Thread(target=_thread_pool_worker, args=args, name='AnyIO worker thread')
+                thread = Thread(target=_thread_pool_worker, args=(work_queue, get_running_loop()),
+                                name='AnyIO worker thread')
                 workers.add(thread)
                 thread.start()
+            else:
+                thread, idle_since = idle_workers.pop()
 
-            return await future
+                # Prune any other workers that have been idle for WORKER_MAX_IDLE_TIME seconds or
+                # longer
+                now = current_time()
+                while idle_workers:
+                    if now - idle_workers[0][1] < WORKER_THREAD_MAX_IDLE_TIME:
+                        break
+
+                    idle_workers.popleft()
+                    work_queue.put_nowait(None)
+                    workers.remove(thread)
+
+            try:
+                return await future
+            finally:
+                idle_workers.append((thread, current_time()))
 
 
 def run_sync_from_thread(func: Callable[..., T_Retval], *args,
@@ -759,6 +759,9 @@ def run_async_from_thread(func: Callable[..., Coroutine[Any, Any, T_Retval]], *a
 
 
 class BlockingPortal(abc.BlockingPortal):
+    def __new__(cls):
+        return object.__new__(cls)
+
     def __init__(self):
         super().__init__()
         self._loop = get_running_loop()
@@ -766,7 +769,7 @@ class BlockingPortal(abc.BlockingPortal):
     def _spawn_task_from_thread(self, func: Callable, args: tuple, kwargs: Dict[str, Any],
                                 name, future: Future) -> None:
         run_sync_from_thread(
-            partial(self._task_group.spawn, name=name), self._call_func, func, args, kwargs,
+            partial(self._task_group.start_soon, name=name), self._call_func, func, args, kwargs,
             future, loop=self._loop)
 
 
@@ -1549,8 +1552,8 @@ class Event(BaseEvent):
         return self._event.is_set()
 
     async def wait(self):
-        await checkpoint()
-        await self._event.wait()
+        if await self._event.wait():
+            await checkpoint()
 
     def statistics(self) -> EventStatistics:
         return EventStatistics(len(self._event._waiters))
@@ -1627,6 +1630,7 @@ class CapacityLimiter(BaseCapacityLimiter):
         return await self.acquire_on_behalf_of(current_task())
 
     async def acquire_on_behalf_of(self, borrower) -> None:
+        await checkpoint_if_cancelled()
         try:
             self.acquire_on_behalf_of_nowait(borrower)
         except WouldBlock:
@@ -1639,6 +1643,8 @@ class CapacityLimiter(BaseCapacityLimiter):
                 raise
 
             self._borrowers.add(borrower)
+        else:
+            await cancel_shielded_checkpoint()
 
     def release(self) -> None:
         self.release_on_behalf_of(current_task())

@@ -1,5 +1,4 @@
 import threading
-from abc import ABCMeta, abstractmethod
 from asyncio import iscoroutine
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import AbstractContextManager, contextmanager
@@ -15,7 +14,7 @@ from ._core._synchronization import Event
 from ._core._tasks import CancelScope, TaskStatus, create_task_group
 
 T_Retval = TypeVar('T_Retval')
-T_co = TypeVar('T_co', covariant=True)
+T_co = TypeVar('T_co')
 
 
 def run(func: Callable[..., Coroutine[Any, Any, T_Retval]], *args) -> T_Retval:
@@ -90,7 +89,7 @@ class _BlockingAsyncContextManager(AbstractContextManager):
 
     def __enter__(self) -> T_co:
         self._enter_future = Future()
-        self._exit_future = self._portal.spawn_task(self.run_async_cm)
+        self._exit_future = self._portal.start_task_soon(self.run_async_cm)
         cm = self._enter_future.result()
         return cast(T_co, cm)
 
@@ -110,8 +109,11 @@ class _BlockingPortalTaskStatus(TaskStatus):
         self._future.set_result(value)
 
 
-class BlockingPortal(metaclass=ABCMeta):
+class BlockingPortal:
     """An object tied that lets external threads run code in an asynchronous event loop."""
+
+    def __new__(cls):
+        return get_asynclib().BlockingPortal()
 
     def __init__(self):
         self._event_loop_thread_id = threading.get_ident()
@@ -184,7 +186,6 @@ class BlockingPortal(metaclass=ABCMeta):
         finally:
             scope = None
 
-    @abstractmethod
     def _spawn_task_from_thread(self, func: Callable, args: tuple, kwargs: Dict[str, Any],
                                 name, future: Future) -> None:
         """
@@ -198,7 +199,9 @@ class BlockingPortal(metaclass=ABCMeta):
         :param name: name of the task (will be coerced to a string if not ``None``)
         :param future: a future that will resolve to the return value of the callable, or the
             exception raised during its execution
+
         """
+        raise NotImplementedError
 
     @overload
     def call(self, func: Callable[..., Coroutine[Any, Any, T_Retval]], *args) -> T_Retval:
@@ -219,11 +222,32 @@ class BlockingPortal(metaclass=ABCMeta):
             the event loop thread
 
         """
-        return self.spawn_task(func, *args).result()
+        return self.start_task_soon(func, *args).result()
 
     def spawn_task(self, func: Callable[..., Coroutine], *args, name=None) -> Future:
         """
-        Spawn a task in the portal's task group.
+        Start a task in the portal's task group.
+
+        :param func: the target coroutine function
+        :param args: positional arguments passed to ``func``
+        :param name: name of the task (will be coerced to a string if not ``None``)
+        :return: a future that resolves with the return value of the callable if the task completes
+            successfully, or with the exception raised in the task
+        :raises RuntimeError: if the portal is not running or if this method is called from within
+            the event loop thread
+
+        .. versionadded:: 2.1
+        .. deprecated:: 3.0
+           Use :meth:`start_task_soon` instead. If your code needs AnyIO 2 compatibility, you
+           can keep using this until AnyIO 4.
+
+        """
+        warn('spawn_task() is deprecated -- use start_task_soon() instead', DeprecationWarning)
+        return self.start_task_soon(func, *args, name=name)
+
+    def start_task_soon(self, func: Callable[..., Coroutine], *args, name=None) -> Future:
+        """
+        Start a task in the portal's task group.
 
         The task will be run inside a cancel scope which can be cancelled by cancelling the
         returned future.
@@ -236,9 +260,7 @@ class BlockingPortal(metaclass=ABCMeta):
         :raises RuntimeError: if the portal is not running or if this method is called from within
             the event loop thread
 
-        .. versionadded:: 2.1
-        .. versionchanged:: 3.0
-            Added the ``name`` argument.
+        .. versionadded:: 3.0
 
         """
         self._check_running()
@@ -248,7 +270,7 @@ class BlockingPortal(metaclass=ABCMeta):
 
     def start_task(self, func: Callable[..., Coroutine], *args, name=None) -> Tuple[Future, Any]:
         """
-        Spawn a task in the portal's task group and wait until it signals for readiness.
+        Start a task in the portal's task group and wait until it signals for readiness.
 
         This method works the same way as :meth:`TaskGroup.start`.
 
@@ -301,8 +323,14 @@ def create_blocking_portal() -> BlockingPortal:
 
     Use this function in asynchronous code when you need to allow external threads access to the
     event loop where your asynchronous code is currently running.
+
+    .. deprecated:: 3.0
+        Use :class:`.BlockingPortal` directly.
+
     """
-    return get_asynclib().BlockingPortal()
+    warn('create_blocking_portal() has been deprecated -- use anyio.from_thread.BlockingPortal() '
+         'directly', DeprecationWarning)
+    return BlockingPortal()
 
 
 @contextmanager
@@ -323,7 +351,7 @@ def start_blocking_portal(
 
     """
     async def run_portal():
-        async with create_blocking_portal() as portal_:
+        async with BlockingPortal() as portal_:
             if future.set_running_or_notify_cancel():
                 future.set_result(portal_)
                 await portal_.sleep_until_stopped()
