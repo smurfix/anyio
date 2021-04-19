@@ -30,7 +30,7 @@ class TaskGroup(metaclass=ABCMeta):
 
     cancel_scope: 'CancelScope'
 
-    async def spawn(self, func: Callable[..., Coroutine], *args, name=None) -> None:
+    def spawn(self, func: Callable[..., Coroutine], *args, name=None) -> None:
         """
         Start a new task in this task group.
 
@@ -43,9 +43,12 @@ class TaskGroup(metaclass=ABCMeta):
            can keep using this until AnyIO 4.
 
         """
+        from anyio._core._compat import DeprecatedAwaitable
+
         warn('spawn() is deprecated -- use start_soon() (without the "await") instead',
              DeprecationWarning)
         self.start_soon(func, *args, name=name)
+        return DeprecatedAwaitable(self.spawn)
 
     @abstractmethod
     def start_soon(self, func: Callable[..., Coroutine], *args, name=None) -> None:
