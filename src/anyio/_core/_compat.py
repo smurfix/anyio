@@ -71,8 +71,9 @@ def maybe_async_cm(cm: Union[ContextManager[T], AsyncContextManager[T]]) -> Asyn
     return _ContextManagerWrapper(cm)
 
 
-def _warn_deprecation(awaitable: AnyDeprecatedAwaitable) -> None:
-    warn(f'Awaiting on {awaitable._name}() is deprecated.', DeprecationWarning)
+def _warn_deprecation(awaitable: AnyDeprecatedAwaitable, stacklevel: int = 1) -> None:
+    warn(f'Awaiting on {awaitable._name}() is deprecated.',
+         DeprecationWarning, stacklevel=stacklevel + 1)
 
 
 class DeprecatedAwaitable:
