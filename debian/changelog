@@ -1,3 +1,9 @@
+anyio (3.0.0-8) smurf; urgency=medium
+
+  * Fix "spawn". Somewhat.
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Thu, 29 Apr 2021 17:23:20 +0200
+
 anyio (3.0.0-7) smurf; urgency=medium
 
   * Merge to final+.

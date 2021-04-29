@@ -15,9 +15,10 @@ __all__ = ('maybe_async', 'maybe_async_cm', 'run', 'sleep', 'current_time', 'get
            'wait_all_tasks_blocked', 'run_sync_in_worker_thread', 'run_async_from_thread',
            'run_sync_from_thread', 'current_default_worker_thread_limiter',
            'create_blocking_portal', 'start_blocking_portal', 'typed_attribute',
-           'TypedAttributeSet', 'TypedAttributeProvider')
+           'TypedAttributeSet', 'TypedAttributeProvider',
+           'DeprecatedAwaitable', 'DeprecatedAsyncContextManager')
 
-from ._core._compat import maybe_async, maybe_async_cm
+from ._core._compat import maybe_async, maybe_async_cm, DeprecatedAwaitable, DeprecatedAsyncContextManager
 from ._core._eventloop import current_time, get_all_backends, get_cancelled_exc_class, run, sleep
 from ._core._exceptions import (
     BrokenResourceError, BrokenWorkerProcess, BusyResourceError, ClosedResourceError,

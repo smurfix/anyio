@@ -45,9 +45,13 @@ class TaskGroup(metaclass=ABCMeta):
         """
         from anyio._core._compat import DeprecatedAwaitable
 
-        warn('spawn() is deprecated -- use start_soon() (without the "await") instead',
-             DeprecationWarning)
+#       warn('spawn() is deprecated -- use start_soon() (without the "await") instead',
+#            DeprecationWarning)
         self.start_soon(func, *args, name=name)
+        return DeprecatedAwaitable(self.spawn)
+
+        from anyio._core._compat import DeprecatedAwaitable
+
         return DeprecatedAwaitable(self.spawn)
 
     @abstractmethod
