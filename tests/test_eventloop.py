@@ -1,8 +1,12 @@
+from __future__ import annotations
 import math
 import sys
 
 import pytest
-from pytest_mock.plugin import MockerFixture
+try:
+    from pytest_mock.plugin import MockerFixture
+except ImportError:
+    pass
 
 from anyio import sleep_forever, sleep_until
 
