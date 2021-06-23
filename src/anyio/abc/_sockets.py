@@ -1,9 +1,12 @@
+import socket
 from abc import abstractmethod
 from io import IOBase
 from ipaddress import IPv4Address, IPv6Address
-from socket import AddressFamily, SocketType
+from socket import AddressFamily
+from types import TracebackType
 from typing import (
-    Any, AsyncContextManager, Callable, Collection, List, Optional, Tuple, TypeVar, Union)
+    Any, AsyncContextManager, Callable, Collection, Dict, List, Mapping, Optional, Tuple, Type,
+    TypeVar, Union)
 
 from .._core._typedattr import TypedAttributeProvider, TypedAttributeSet, typed_attribute
 from ._streams import ByteStream, Listener, T_Stream, UnreliableObjectStream
@@ -17,11 +20,13 @@ T_Retval = TypeVar('T_Retval')
 
 
 class _NullAsyncContextManager:
-    async def __aenter__(self):
+    async def __aenter__(self) -> None:
         pass
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        pass
+    async def __aexit__(self, exc_type: Optional[Type[BaseException]],
+                        exc_val: Optional[BaseException],
+                        exc_tb: Optional[TracebackType]) -> Optional[bool]:
+        return None
 
 
 class SocketAttribute(TypedAttributeSet):
@@ -32,7 +37,7 @@ class SocketAttribute(TypedAttributeSet):
     #: for IP addresses, the local port the underlying socket is bound to
     local_port: int = typed_attribute()
     #: the underlying stdlib socket object
-    raw_socket: SocketType = typed_attribute()
+    raw_socket: socket.socket = typed_attribute()
     #: the remote address the underlying socket is connected to
     remote_address: SockAddrType = typed_attribute()
     #: for IP addresses, the remote port the underlying socket is connected to
@@ -41,16 +46,16 @@ class SocketAttribute(TypedAttributeSet):
 
 class _SocketProvider(TypedAttributeProvider):
     @property
-    def extra_attributes(self):
+    def extra_attributes(self) -> Mapping[Any, Callable[[], Any]]:
         from .._core._sockets import convert_ipv6_sockaddr as convert
 
-        attributes = {
+        attributes: Dict[Any, Callable[[], Any]] = {
             SocketAttribute.family: lambda: self._raw_socket.family,
             SocketAttribute.local_address: lambda: convert(self._raw_socket.getsockname()),
             SocketAttribute.raw_socket: lambda: self._raw_socket
         }
         try:
-            peername = convert(self._raw_socket.getpeername())
+            peername: Optional[Tuple[str, int]] = convert(self._raw_socket.getpeername())
         except OSError:
             peername = None
 
@@ -62,13 +67,14 @@ class _SocketProvider(TypedAttributeProvider):
         if self._raw_socket.family in (AddressFamily.AF_INET, AddressFamily.AF_INET6):
             attributes[SocketAttribute.local_port] = lambda: self._raw_socket.getsockname()[1]
             if peername is not None:
-                attributes[SocketAttribute.remote_port] = lambda: peername[1]
+                remote_port = peername[1]
+                attributes[SocketAttribute.remote_port] = lambda: remote_port
 
         return attributes
 
     @property
     @abstractmethod
-    def _raw_socket(self) -> SocketType:
+    def _raw_socket(self) -> socket.socket:
         pass
 
 

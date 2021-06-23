@@ -21,7 +21,7 @@ class UnreliableObjectReceiveStream(Generic[T_Item], AsyncResource, TypedAttribu
     parameter.
     """
 
-    def __aiter__(self):
+    def __aiter__(self) -> "UnreliableObjectReceiveStream[T_Item]":
         return self
 
     async def __anext__(self) -> T_Item:
@@ -123,6 +123,9 @@ class ByteReceiveStream(AsyncResource, TypedAttributeProvider):
     async def receive(self, max_bytes: int = 65536) -> bytes:
         """
         Receive at most ``max_bytes`` bytes from the peer.
+
+        .. note:: Implementors of this interface should not return an empty :cls:`bytes` object,
+            and users should ignore them.
 
         :param max_bytes: maximum number of bytes to receive
         :return: the received bytes

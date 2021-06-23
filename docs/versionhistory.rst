@@ -3,6 +3,59 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
+**3.2.0**
+
+- Added Python 3.10 compatibility
+- Added the ability to close memory object streams synchronously (including support for use as a
+  synchronous context manager)
+- Changed the default value of the ``use_uvloop`` asyncio backend option to ``False`` to prevent
+  unsafe event loop policy changes in different threads
+- Fixed ``to_thread.run_sync()`` hanging on the second call on asyncio when used with
+  ``loop.run_until_complete()``
+- Fixed ``to_thread.run_sync()`` prematurely marking a worker thread inactive when a task await on
+  the result is cancelled
+- Fixed ``ResourceWarning`` about an unclosed socket when UNIX socket connect fails on asyncio
+- Fixed the type annotation of ``open_signal_receiver()`` as a synchronous context manager
+- Fixed the type annotation of ``DeprecatedAwaitable(|List|Float).__await__`` to match the ``typing.Awaitable`` protocol
+
+**3.1.0**
+
+- Added ``env`` and ``cwd`` keyword arguments to ``run_process()`` and ``open_process``.
+- Added support for mutation of ``CancelScope.shield`` (PR by John Belmonte)
+- Added the ``sleep_forever()`` and ``sleep_until()`` functions
+- Changed asyncio task groups so that if the host and child tasks have only raised
+  ``CancelledErrors``, just one ``CancelledError`` will now be raised instead of an
+  ``ExceptionGroup``, allowing asyncio to ignore it when it propagates out of the task
+- Changed task names to be converted to ``str`` early on asyncio (PR by Thomas Grainger)
+- Fixed ``sniffio._impl.AsyncLibraryNotFoundError: unknown async library, or not in async context``
+  on asyncio and Python 3.6 when ``to_thread.run_sync()`` is used from
+  ``loop.run_until_complete()``
+- Fixed odd ``ExceptionGroup: 0 exceptions were raised in the task group`` appearing under certain
+  circumstances on asyncio
+- Fixed ``wait_all_tasks_blocked()`` returning prematurely on asyncio when a previously blocked
+  task is cancelled (PR by Thomas Grainger)
+- Fixed declared return type of ``TaskGroup.start()`` (it was declared as ``None``, but anything
+  can be returned from it)
+- Fixed ``TextStream.extra_attributes`` raising ``AttributeError`` (PR by Thomas Grainger)
+- Fixed ``await maybe_async(current_task())`` returning ``None`` (PR by Thomas Grainger)
+- Fixed: ``pickle.dumps(current_task())`` now correctly raises ``TypeError`` instead of pickling to
+  ``None`` (PR by Thomas Grainger)
+- Fixed return type annotation of ``Event.wait()`` (``bool`` → ``None``) (PR by Thomas Grainger)
+- Fixed return type annotation of ``RunVar.get()`` to return either the type of the default value
+  or the type of the contained value (PR by Thomas Grainger)
+- Fixed a deprecation warning message to refer to ``maybe_async()`` and not ``maybe_awaitable()``
+  (PR by Thomas Grainger)
+- Filled in argument and return types for all functions and methods previously missing them
+  (PR by Thomas Grainger)
+
+**3.0.1**
+
+- Fixed ``to_thread.run_sync()`` raising ``RuntimeError`` on asyncio when no "root" task could be
+  found for setting up a cleanup callback. This was a problem at least on Tornado and possibly also
+  Twisted in asyncio compatibility mode. The life of worker threads is now bound to the the host
+  task of the topmost cancel scope hierarchy starting from the current one, or if no cancel scope
+  is active, the current task.
+
 **3.0.0**
 
 - Curio support has been dropped (see the :doc:`FAQ <faq>` as for why)

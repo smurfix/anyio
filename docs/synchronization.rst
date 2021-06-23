@@ -7,6 +7,9 @@ Synchronization primitives are objects that are used by tasks to communicate and
 each other. They are useful for things like distributing workload, notifying other tasks and
 guarding access to shared resources.
 
+.. note:: AnyIO primitives are not thread-safe, therefore they should not be used directly from
+          worker threads.  Use :func:`~from_thread.run_sync` for that.
+
 Events
 ------
 
@@ -119,15 +122,15 @@ Example::
 
             await sleep(1)
             async with condition:
-                await condition.notify(1)
+                condition.notify(1)
 
             await sleep(1)
             async with condition:
-                await condition.notify(2)
+                condition.notify(2)
 
             await sleep(1)
             async with condition:
-                await condition.notify_all()
+                condition.notify_all()
 
     run(main)
 
