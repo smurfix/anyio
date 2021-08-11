@@ -71,9 +71,10 @@ Async file I/O
 --------------
 
 .. autofunction:: anyio.open_file
+.. autofunction:: anyio.wrap_file
 
 .. autoclass:: anyio.AsyncFile
-
+.. autoclass:: anyio.Path
 
 Streams and stream wrappers
 ---------------------------

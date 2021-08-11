@@ -21,7 +21,9 @@ __all__ = (
     'TypedAttributeLookupError',
     'WouldBlock',
     'AsyncFile',
+    'Path',
     'open_file',
+    'wrap_file',
     'aclose_forcefully',
     'open_signal_receiver',
     'connect_tcp',
@@ -74,7 +76,8 @@ __all__ = (
     'TypedAttributeProvider'
 )
 
-from ._core._compat import maybe_async, maybe_async_cm, DeprecatedAwaitable, DeprecatedAsyncContextManager
+from ._core._compat import maybe_async, maybe_async_cm
+from ._core._compat import DeprecatedAsyncContextManager, DeprecatedAwaitable
 from ._core._eventloop import (
     current_time, get_all_backends, get_cancelled_exc_class, run, sleep, sleep_forever,
     sleep_until)
@@ -82,7 +85,7 @@ from ._core._exceptions import (
     BrokenResourceError, BrokenWorkerProcess, BusyResourceError, ClosedResourceError,
     DelimiterNotFound, EndOfStream, ExceptionGroup, IncompleteRead, TypedAttributeLookupError,
     WouldBlock)
-from ._core._fileio import AsyncFile, open_file
+from ._core._fileio import AsyncFile, Path, open_file, wrap_file
 from ._core._resources import aclose_forcefully
 from ._core._signals import open_signal_receiver
 from ._core._sockets import (

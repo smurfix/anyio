@@ -698,12 +698,10 @@ _Retval_Queue_Type = Tuple[Optional[T_Retval], Optional[BaseException]]
 
 
 class WorkerThread(Thread):
-    __slots__ = 'root_task', 'workers', 'idle_workers', 'loop', 'queue', 'idle_since'
-
     MAX_IDLE_TIME = 10  # seconds
 
     def __init__(self, root_task: asyncio.Task, workers: Set['WorkerThread'],
-                 idle_workers: Deque['WorkerThread'],):
+                 idle_workers: Deque['WorkerThread']):
         super().__init__(name='AnyIO worker thread')
         self.root_task = root_task
         self.workers = workers
@@ -711,11 +709,14 @@ class WorkerThread(Thread):
         self.loop = root_task._loop
         self.queue: Queue[Union[Tuple[Callable, tuple, asyncio.Future], None]] = Queue(2)
         self.idle_since = current_time()
+        self.stopping = False
 
     def _report_result(self, future: asyncio.Future, result: Any,
                        exc: Optional[BaseException]) -> None:
         self.idle_since = current_time()
-        self.idle_workers.append(self)
+        if not self.stopping:
+            self.idle_workers.append(self)
+
         if not future.cancelled():
             if exc is not None:
                 future.set_exception(exc)
@@ -747,6 +748,7 @@ class WorkerThread(Thread):
                 self.queue.task_done()
 
     def stop(self, f: Optional[asyncio.Task] = None) -> None:
+        self.stopping = True
         self.queue.put_nowait(None)
         self.workers.discard(self)
         try:
@@ -792,9 +794,9 @@ async def run_sync_in_worker_thread(
                     if now - idle_workers[0].idle_since < WorkerThread.MAX_IDLE_TIME:
                         break
 
-                    worker = idle_workers.popleft()
-                    worker.root_task.remove_done_callback(worker.stop)
-                    worker.stop()
+                    expired_worker = idle_workers.popleft()
+                    expired_worker.root_task.remove_done_callback(expired_worker.stop)
+                    expired_worker.stop()
 
             worker.queue.put_nowait((func, args, future))
             return await future

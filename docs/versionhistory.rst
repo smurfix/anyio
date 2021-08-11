@@ -3,6 +3,24 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
+**3.3.0**
+
+- Added asynchronous ``Path`` class
+- Added the ``wrap_file()`` function for wrapping existing files as asynchronous file objects
+- Relaxed the type of the ``path`` initializer argument to ``FileReadStream`` and
+  ``FileWriteStream`` so they accept any path-like object (including the new asynchronous ``Path``
+  class)
+- Dropped unnecessary dependency on the ``async_generator`` library
+- Changed the generics in ``AsyncFile`` so that the methods correctly return either ``str`` or
+  ``bytes`` based on the argument to ``open_file()``
+- Fixed an asyncio bug where under certain circumstances, a stopping worker thread would still
+  accept new assignments, leading to a hang
+
+**3.2.1**
+
+- Fixed idle thread pruning on asyncio sometimes causing an expired worker thread to be assigned a
+  task
+
 **3.2.0**
 
 - Added Python 3.10 compatibility
@@ -16,7 +34,8 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
   the result is cancelled
 - Fixed ``ResourceWarning`` about an unclosed socket when UNIX socket connect fails on asyncio
 - Fixed the type annotation of ``open_signal_receiver()`` as a synchronous context manager
-- Fixed the type annotation of ``DeprecatedAwaitable(|List|Float).__await__`` to match the ``typing.Awaitable`` protocol
+- Fixed the type annotation of ``DeprecatedAwaitable(|List|Float).__await__`` to match the
+  ``typing.Awaitable`` protocol
 
 **3.1.0**
 
@@ -233,7 +252,7 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
   - **BACKWARDS INCOMPATIBLE** Some functions have been renamed or removed (see further below for
     socket/fileio API changes):
 
-    - ``finalize()`` → (removed; use ``async_generator.aclosing()`` instead)
+    - ``finalize()`` → (removed; use ``contextlib.aclosing()`` instead)
     - ``receive_signals()`` → ``open_signal_receiver()``
     - ``run_in_thread()`` → ``run_sync_in_worker_thread()``
     - ``current_default_thread_limiter()`` → ``current_default_worker_thread_limiter()``
