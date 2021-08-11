@@ -30,7 +30,7 @@ class TaskGroup(metaclass=ABCMeta):
 
     cancel_scope: 'CancelScope'
 
-    async def spawn(self, func: Callable[..., Coroutine],
+    def spawn(self, func: Callable[..., Coroutine],
                     *args: object, name: object = None) -> None:
         """
         Start a new task in this task group.
@@ -47,6 +47,9 @@ class TaskGroup(metaclass=ABCMeta):
         warn('spawn() is deprecated -- use start_soon() (without the "await") instead',
              DeprecationWarning)
         self.start_soon(func, *args, name=name)
+        from .._core._compat import DeprecatedAwaitable
+        return DeprecatedAwaitable(self.spawn)
+
 
     @abstractmethod
     def start_soon(self, func: Callable[..., Coroutine],
