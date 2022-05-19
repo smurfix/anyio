@@ -6,11 +6,13 @@ from .._core._typedattr import TypedAttributeProvider
 from ._resources import AsyncResource
 from ._tasks import TaskGroup
 
-T_Item = TypeVar('T_Item')
-T_Stream = TypeVar('T_Stream')
+T_Item = TypeVar("T_Item")
+T_Stream = TypeVar("T_Stream")
 
 
-class UnreliableObjectReceiveStream(Generic[T_Item], AsyncResource, TypedAttributeProvider):
+class UnreliableObjectReceiveStream(
+    Generic[T_Item], AsyncResource, TypedAttributeProvider
+):
     """
     An interface for receiving objects.
 
@@ -43,7 +45,9 @@ class UnreliableObjectReceiveStream(Generic[T_Item], AsyncResource, TypedAttribu
         """
 
 
-class UnreliableObjectSendStream(Generic[T_Item], AsyncResource, TypedAttributeProvider):
+class UnreliableObjectSendStream(
+    Generic[T_Item], AsyncResource, TypedAttributeProvider
+):
     """
     An interface for sending objects.
 
@@ -64,8 +68,9 @@ class UnreliableObjectSendStream(Generic[T_Item], AsyncResource, TypedAttributeP
         """
 
 
-class UnreliableObjectStream(UnreliableObjectReceiveStream[T_Item],
-                             UnreliableObjectSendStream[T_Item]):
+class UnreliableObjectStream(
+    UnreliableObjectReceiveStream[T_Item], UnreliableObjectSendStream[T_Item]
+):
     """
     A bidirectional message stream which does not guarantee the order or reliability of message
     delivery.
@@ -86,8 +91,11 @@ class ObjectSendStream(UnreliableObjectSendStream[T_Item]):
     """
 
 
-class ObjectStream(ObjectReceiveStream[T_Item], ObjectSendStream[T_Item],
-                   UnreliableObjectStream[T_Item]):
+class ObjectStream(
+    ObjectReceiveStream[T_Item],
+    ObjectSendStream[T_Item],
+    UnreliableObjectStream[T_Item],
+):
     """
     A bidirectional message stream which guarantees the order and reliability of message delivery.
     """
@@ -110,7 +118,7 @@ class ByteReceiveStream(AsyncResource, TypedAttributeProvider):
     65536 bytes.
     """
 
-    def __aiter__(self) -> 'ByteReceiveStream':
+    def __aiter__(self) -> "ByteReceiveStream":
         return self
 
     async def __anext__(self) -> bytes:
@@ -124,7 +132,7 @@ class ByteReceiveStream(AsyncResource, TypedAttributeProvider):
         """
         Receive at most ``max_bytes`` bytes from the peer.
 
-        .. note:: Implementors of this interface should not return an empty :cls:`bytes` object,
+        .. note:: Implementors of this interface should not return an empty :class:`bytes` object,
             and users should ignore them.
 
         :param max_bytes: maximum number of bytes to receive
@@ -159,7 +167,9 @@ class ByteStream(ByteReceiveStream, ByteSendStream):
 
 
 #: Type alias for all unreliable bytes-oriented receive streams.
-AnyUnreliableByteReceiveStream = Union[UnreliableObjectReceiveStream[bytes], ByteReceiveStream]
+AnyUnreliableByteReceiveStream = Union[
+    UnreliableObjectReceiveStream[bytes], ByteReceiveStream
+]
 #: Type alias for all unreliable bytes-oriented send streams.
 AnyUnreliableByteSendStream = Union[UnreliableObjectSendStream[bytes], ByteSendStream]
 #: Type alias for all unreliable bytes-oriented streams.
@@ -176,8 +186,9 @@ class Listener(Generic[T_Stream], AsyncResource, TypedAttributeProvider):
     """An interface for objects that let you accept incoming connections."""
 
     @abstractmethod
-    async def serve(self, handler: Callable[[T_Stream], Any],
-                    task_group: Optional[TaskGroup] = None) -> None:
+    async def serve(
+        self, handler: Callable[[T_Stream], Any], task_group: Optional[TaskGroup] = None
+    ) -> None:
         """
         Accept incoming connections as they come in and start tasks to handle them.
 

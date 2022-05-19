@@ -3,6 +3,80 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
+**3.6.1**
+
+- Fixed exception handler in the asyncio test runner not properly handling a context
+  that does not contain the ``exception`` key
+
+**3.6.0**
+
+- Fixed ``TypeError`` in ``get_current_task()`` on asyncio when using a custom ``Task`` factory
+- Updated type annotations on ``run_process()`` and ``open_process()``:
+
+  * ``command`` now accepts accepts bytes and sequences of bytes
+  * ``stdin``, ``stdout`` and ``stderr`` now accept file-like objects
+    (PR by John T. Wodder II)
+- Changed the pytest plugin to run both the setup and teardown phases of asynchronous
+  generator fixtures within a single task to enable use cases such as cancel scopes and
+  task groups where a context manager straddles the ``yield``
+
+**3.5.0**
+
+- Added ``start_new_session`` keyword argument to ``run_process()`` and ``open_process()``
+  (PR by Jordan Speicher)
+- Fixed deadlock in synchronization primitives on asyncio which can happen if a task acquiring a
+  primitive is hit with a native (not AnyIO) cancellation with just the right timing, leaving the
+  next acquiring task waiting forever (`#398 <https://github.com/agronholm/anyio/issues/398>`_)
+- Added workaround for bpo-46313_ to enable compatibility with OpenSSL 3.0
+
+.. _bpo-46313: https://bugs.python.org/issue46313
+
+**3.4.0**
+
+- Added context propagation to/from worker threads in ``to_thread.run_sync()``,
+  ``from_thread.run()`` and ``from_thread.run_sync()``
+  (`#363 <https://github.com/agronholm/anyio/issues/363>`_; partially based on a PR by Sebastián
+  Ramírez)
+
+  **NOTE**: Requires Python 3.7 to work properly on asyncio!
+- Fixed race condition in ``Lock`` and ``Semaphore`` classes when a task waiting on ``acquire()``
+  is cancelled while another task is waiting to acquire the same primitive
+  (`#387 <https://github.com/agronholm/anyio/issues/387>`_)
+- Fixed async context manager's ``__aexit__()`` method not being called in
+  ``BlockingPortal.wrap_async_context_manager()`` if the host task is cancelled
+  (`#381 <https://github.com/agronholm/anyio/issues/381>`_; PR by Jonathan Slenders)
+- Fixed worker threads being marked as being event loop threads in sniffio
+- Fixed task parent ID not getting set to the correct value on asyncio
+- Enabled the test suite to run without IPv6 support, trio or pytest plugin autoloading
+
+**3.3.4**
+
+- Fixed ``BrokenResourceError`` instead of ``EndOfStream`` being raised in ``TLSStream`` when the
+  peer abruptly closes the connection while ``TLSStream`` is receiving data with
+  ``standard_compatible=False`` set
+
+**3.3.3**
+
+- Fixed UNIX socket listener not setting accepted sockets to non-blocking mode on asyncio
+- Changed unconnected UDP sockets to be always bound to a local port (on "any" interface) to avoid
+  errors on asyncio + Windows
+
+**3.3.2**
+
+- Fixed cancellation problem on asyncio where level-triggered cancellation for **all** parent
+  cancel scopes would not resume after exiting a shielded nested scope
+  (`#370 <https://github.com/agronholm/anyio/issues/370>`_)
+
+**3.3.1**
+
+- Added missing documentation for the ``ExceptionGroup.exceptions`` attribute
+- Changed the asyncio test runner not to use uvloop by default (to match the behavior of
+  ``anyio.run()``)
+- Fixed ``RuntimeError`` on asyncio when a ``CancelledError`` is raised from a task spawned through
+  a ``BlockingPortal`` (`#357 <https://github.com/agronholm/anyio/issues/357>`_)
+- Fixed asyncio warning about a ``Future`` with an exception that was never retrieved which
+  happened when a socket was already written to but the peer abruptly closed the connection
+
 **3.3.0**
 
 - Added asynchronous ``Path`` class

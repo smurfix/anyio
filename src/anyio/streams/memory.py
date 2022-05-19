@@ -4,20 +4,27 @@ from types import TracebackType
 from typing import Deque, Generic, List, NamedTuple, Optional, Type, TypeVar
 
 from .. import (
-    BrokenResourceError, ClosedResourceError, EndOfStream, WouldBlock, get_cancelled_exc_class)
+    BrokenResourceError,
+    ClosedResourceError,
+    EndOfStream,
+    WouldBlock,
+    get_cancelled_exc_class,
+)
 from .._core._compat import DeprecatedAwaitable
 from ..abc import Event, ObjectReceiveStream, ObjectSendStream
 from ..lowlevel import checkpoint
 
-T_Item = TypeVar('T_Item')
+T_Item = TypeVar("T_Item")
 
 
 class MemoryObjectStreamStatistics(NamedTuple):
-    current_buffer_used: int
+    current_buffer_used: int  #: number of items stored in the buffer
+    #: maximum number of items that can be stored on this stream (or :data:`math.inf`)
     max_buffer_size: float
-    open_send_streams: int
-    open_receive_streams: int
-    tasks_waiting_send: int
+    open_send_streams: int  #: number of unclosed clones of the send stream
+    open_receive_streams: int  #: number of unclosed clones of the receive stream
+    tasks_waiting_send: int  #: number of tasks blocked on :meth:`MemoryObjectSendStream.send`
+    #: number of tasks blocked on :meth:`MemoryObjectReceiveStream.receive`
     tasks_waiting_receive: int
 
 
@@ -27,14 +34,22 @@ class MemoryObjectStreamState(Generic[T_Item]):
     buffer: Deque[T_Item] = field(init=False, default_factory=deque)
     open_send_channels: int = field(init=False, default=0)
     open_receive_channels: int = field(init=False, default=0)
-    waiting_receivers: 'OrderedDict[Event, List[T_Item]]' = field(init=False,
-                                                                  default_factory=OrderedDict)
-    waiting_senders: 'OrderedDict[Event, T_Item]' = field(init=False, default_factory=OrderedDict)
+    waiting_receivers: "OrderedDict[Event, List[T_Item]]" = field(
+        init=False, default_factory=OrderedDict
+    )
+    waiting_senders: "OrderedDict[Event, T_Item]" = field(
+        init=False, default_factory=OrderedDict
+    )
 
     def statistics(self) -> MemoryObjectStreamStatistics:
         return MemoryObjectStreamStatistics(
-            len(self.buffer), self.max_buffer_size, self.open_send_channels,
-            self.open_receive_channels, len(self.waiting_senders), len(self.waiting_receivers))
+            len(self.buffer),
+            self.max_buffer_size,
+            self.open_send_channels,
+            self.open_receive_channels,
+            len(self.waiting_senders),
+            len(self.waiting_receivers),
+        )
 
 
 @dataclass(eq=False)
@@ -98,7 +113,7 @@ class MemoryObjectReceiveStream(Generic[T_Item], ObjectReceiveStream[T_Item]):
             else:
                 raise EndOfStream
 
-    def clone(self) -> 'MemoryObjectReceiveStream':
+    def clone(self) -> "MemoryObjectReceiveStream[T_Item]":
         """
         Create a clone of this receive stream.
 
@@ -140,12 +155,15 @@ class MemoryObjectReceiveStream(Generic[T_Item], ObjectReceiveStream[T_Item]):
         """
         return self._state.statistics()
 
-    def __enter__(self) -> 'MemoryObjectReceiveStream[T_Item]':
+    def __enter__(self) -> "MemoryObjectReceiveStream[T_Item]":
         return self
 
-    def __exit__(self, exc_type: Optional[Type[BaseException]],
-                 exc_val: Optional[BaseException],
-                 exc_tb: Optional[TracebackType]) -> None:
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType],
+    ) -> None:
         self.close()
 
 
@@ -202,7 +220,7 @@ class MemoryObjectSendStream(Generic[T_Item], ObjectSendStream[T_Item]):
             if self._state.waiting_senders.pop(send_event, None):  # type: ignore[arg-type]
                 raise BrokenResourceError
 
-    def clone(self) -> 'MemoryObjectSendStream':
+    def clone(self) -> "MemoryObjectSendStream[T_Item]":
         """
         Create a clone of this send stream.
 
@@ -245,10 +263,13 @@ class MemoryObjectSendStream(Generic[T_Item], ObjectSendStream[T_Item]):
         """
         return self._state.statistics()
 
-    def __enter__(self) -> 'MemoryObjectSendStream[T_Item]':
+    def __enter__(self) -> "MemoryObjectSendStream[T_Item]":
         return self
 
-    def __exit__(self, exc_type: Optional[Type[BaseException]],
-                 exc_val: Optional[BaseException],
-                 exc_tb: Optional[TracebackType]) -> None:
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType],
+    ) -> None:
         self.close()

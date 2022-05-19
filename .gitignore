@@ -16,4 +16,3 @@ __pycache__
 /.pybuild
 .cache
 .local
-.pre-commit-config.yaml
