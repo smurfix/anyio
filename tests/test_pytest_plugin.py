@@ -1,13 +1,17 @@
 import pytest
-from _pytest.pytester import Testdir
+from _pytest.logging import LogCaptureFixture
+from _pytest.pytester import Pytester
 
 from anyio import get_all_backends
 
 pytestmark = pytest.mark.filterwarnings(
-    'ignore:The TerminalReporter.writer attribute is deprecated:pytest.PytestDeprecationWarning:')
+    "ignore:The TerminalReporter.writer attribute is deprecated:pytest.PytestDeprecationWarning:"
+)
+
+pytest_args = "-v", "-p", "anyio", "-p", "no:asyncio"
 
 
-def test_plugin(testdir: Testdir) -> None:
+def test_plugin(testdir: Pytester) -> None:
     testdir.makeconftest(
         """
         import sniffio
@@ -31,8 +35,6 @@ def test_plugin(testdir: Testdir) -> None:
 
     testdir.makepyfile(
         """
-        import asyncio
-
         import pytest
         import sniffio
         from hypothesis import strategies, given
@@ -61,11 +63,13 @@ def test_plugin(testdir: Testdir) -> None:
         """
     )
 
-    result = testdir.runpytest('-v', '-p', 'no:asyncio')
-    result.assert_outcomes(passed=3 * len(get_all_backends()), skipped=len(get_all_backends()))
+    result = testdir.runpytest(*pytest_args)
+    result.assert_outcomes(
+        passed=3 * len(get_all_backends()), skipped=len(get_all_backends())
+    )
 
 
-def test_asyncio(testdir: Testdir) -> None:
+def test_asyncio(testdir: Pytester, caplog: LogCaptureFixture) -> None:
     testdir.makeconftest(
         """
         import asyncio
@@ -81,7 +85,7 @@ def test_asyncio(testdir: Testdir) -> None:
             def callback():
                 raise RuntimeError('failing fixture setup')
 
-            asyncio.get_event_loop().call_soon(callback)
+            asyncio.get_running_loop().call_soon(callback)
             await asyncio.sleep(0)
             yield None
 
@@ -91,7 +95,7 @@ def test_asyncio(testdir: Testdir) -> None:
                 raise RuntimeError('failing fixture teardown')
 
             yield None
-            asyncio.get_event_loop().call_soon(callback)
+            asyncio.get_running_loop().call_soon(callback)
             await asyncio.sleep(0)
         """
     )
@@ -122,7 +126,7 @@ def test_asyncio(testdir: Testdir) -> None:
                 raise Exception('foo')
 
             started = False
-            asyncio.get_event_loop().call_soon(callback)
+            asyncio.get_running_loop().call_soon(callback)
             await asyncio.sleep(0)
             assert started
 
@@ -131,14 +135,22 @@ def test_asyncio(testdir: Testdir) -> None:
 
         async def test_callback_exception_during_teardown(teardown_fail_fixture):
             pass
+
+        async def test_exception_handler_no_exception():
+            asyncio.get_event_loop().call_exception_handler(
+                {"message": "bogus error"}
+            )
+            await asyncio.sleep(0.1)
         """
     )
 
-    result = testdir.runpytest('-v', '-p', 'no:asyncio')
-    result.assert_outcomes(passed=2, failed=1, errors=2)
+    result = testdir.runpytest(*pytest_args)
+    result.assert_outcomes(passed=3, failed=1, errors=2)
+    assert len(caplog.messages) == 1
+    assert caplog.messages[0] == "bogus error"
 
 
-def test_autouse_async_fixture(testdir: Testdir) -> None:
+def test_autouse_async_fixture(testdir: Pytester) -> None:
     testdir.makeconftest(
         """
         import pytest
@@ -171,11 +183,11 @@ def test_autouse_async_fixture(testdir: Testdir) -> None:
         """
     )
 
-    result = testdir.runpytest('-v', '-p', 'no:asyncio')
+    result = testdir.runpytest_subprocess(*pytest_args)
     result.assert_outcomes(passed=len(get_all_backends()))
 
 
-def test_cancel_scope_in_asyncgen_fixture(testdir: Testdir) -> None:
+def test_cancel_scope_in_asyncgen_fixture(testdir: Pytester) -> None:
     testdir.makepyfile(
         """
         import pytest
@@ -198,11 +210,68 @@ def test_cancel_scope_in_asyncgen_fixture(testdir: Testdir) -> None:
         """
     )
 
-    result = testdir.runpytest('-v', '-p', 'no:asyncio')
+    result = testdir.runpytest_subprocess(*pytest_args)
     result.assert_outcomes(passed=len(get_all_backends()))
 
 
-def test_hypothesis_module_mark(testdir: Testdir) -> None:
+def test_module_scoped_task_group_fixture(testdir: Pytester) -> None:
+    testdir.makeconftest(
+        """
+        import pytest
+
+        from anyio import (
+            CancelScope,
+            create_memory_object_stream,
+            create_task_group,
+            get_all_backends,
+        )
+
+
+        @pytest.fixture(scope="module", params=get_all_backends())
+        def anyio_backend():
+            return 'asyncio'
+
+
+        @pytest.fixture(scope="module")
+        async def task_group():
+            async with create_task_group() as tg:
+                yield tg
+
+
+        @pytest.fixture
+        async def streams(task_group):
+            async def echo_messages(*, task_status):
+                with CancelScope() as cancel_scope:
+                    task_status.started(cancel_scope)
+                    async for obj in receive1:
+                        await send2.send(obj)
+
+            send1, receive1 = create_memory_object_stream()
+            send2, receive2 = create_memory_object_stream()
+            cancel_scope = await task_group.start(echo_messages)
+            yield send1, receive2
+            cancel_scope.cancel()
+        """
+    )
+
+    testdir.makepyfile(
+        """
+        import pytest
+
+
+        @pytest.mark.anyio
+        async def test_task_group(streams):
+            send1, receive2 = streams
+            await send1.send("hello")
+            assert await receive2.receive() == "hello"
+        """
+    )
+
+    result = testdir.runpytest_subprocess(*pytest_args)
+    result.assert_outcomes(passed=len(get_all_backends()))
+
+
+def test_hypothesis_module_mark(testdir: Pytester) -> None:
     testdir.makepyfile(
         """
         import pytest
@@ -229,11 +298,13 @@ def test_hypothesis_module_mark(testdir: Testdir) -> None:
         """
     )
 
-    result = testdir.runpytest('-v', '-p', 'no:asyncio')
-    result.assert_outcomes(passed=len(get_all_backends()) + 1, xfailed=len(get_all_backends()))
+    result = testdir.runpytest(*pytest_args)
+    result.assert_outcomes(
+        passed=len(get_all_backends()) + 1, xfailed=len(get_all_backends())
+    )
 
 
-def test_hypothesis_function_mark(testdir: Testdir) -> None:
+def test_hypothesis_function_mark(testdir: Pytester) -> None:
     testdir.makepyfile(
         """
         import pytest
@@ -268,5 +339,7 @@ def test_hypothesis_function_mark(testdir: Testdir) -> None:
         """
     )
 
-    result = testdir.runpytest('-v', '-p', 'no:asyncio')
-    result.assert_outcomes(passed=2 * len(get_all_backends()), xfailed=2 * len(get_all_backends()))
+    result = testdir.runpytest(*pytest_args)
+    result.assert_outcomes(
+        passed=2 * len(get_all_backends()), xfailed=2 * len(get_all_backends())
+    )

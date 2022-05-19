@@ -50,8 +50,8 @@ If you need to call a coroutine function from a worker thread, you can do this::
 
     run(main)
 
-.. note:: The worker thread must have been spawned using :func:`~run_sync_in_worker_thread`
-   for this to work.
+.. note:: The worker thread must have been spawned using :func:`~to_thread.run_sync` for this to
+   work.
 
 Calling synchronous code from a worker thread
 ---------------------------------------------
@@ -178,5 +178,14 @@ managers as a synchronous one::
 .. note:: You cannot use wrapped async context managers in synchronous callbacks inside the event
           loop thread.
 
-.. note:: The ``__aenter__()`` and ``__aexit__()`` methods will be called from different
-          tasks so a task group as the async context manager will not work here.
+Context propagation
+-------------------
+
+When running functions in worker threads, the current context is copied to the worker thread.
+Therefore any context variables available on the task will also be available to the code running
+on the thread. As always with context variables, any changes made to them will not propagate back
+to the calling asynchronous task.
+
+When calling asynchronous code from worker threads, context is again copied to the task that calls
+the target function in the event loop thread. Note, however, that this **does not work** on asyncio
+when running on Python 3.6.
