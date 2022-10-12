@@ -1,7 +1,10 @@
+from __future__ import annotations
+
 import asyncio
 import ssl
+from collections.abc import Generator
 from ssl import SSLContext
-from typing import Any, Dict, Generator, Tuple
+from typing import Any
 
 import pytest
 import trustme
@@ -41,7 +44,7 @@ pytest_plugins = ["pytester", "pytest_mock"]
         pytest.param("trio"),
     ]
 )
-def anyio_backend(request: SubRequest) -> Tuple[str, Dict[str, Any]]:
+def anyio_backend(request: SubRequest) -> tuple[str, dict[str, Any]]:
     return request.param
 
 
@@ -54,7 +57,9 @@ def ca() -> CA:
 def server_context(ca: CA) -> SSLContext:
     server_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     if hasattr(ssl, "OP_IGNORE_UNEXPECTED_EOF"):
-        server_context.options ^= ssl.OP_IGNORE_UNEXPECTED_EOF  # type: ignore[attr-defined]
+        server_context.options ^= (
+            ssl.OP_IGNORE_UNEXPECTED_EOF  # type: ignore[attr-defined]
+        )
 
     ca.issue_cert("localhost").configure_cert(server_context)
     return server_context
@@ -64,7 +69,9 @@ def server_context(ca: CA) -> SSLContext:
 def client_context(ca: CA) -> SSLContext:
     client_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
     if hasattr(ssl, "OP_IGNORE_UNEXPECTED_EOF"):
-        client_context.options ^= ssl.OP_IGNORE_UNEXPECTED_EOF  # type: ignore[attr-defined]
+        client_context.options ^= (
+            ssl.OP_IGNORE_UNEXPECTED_EOF  # type: ignore[attr-defined]
+        )
 
     ca.configure_trust(client_context)
     return client_context

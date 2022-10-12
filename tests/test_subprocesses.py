@@ -1,10 +1,11 @@
+from __future__ import annotations
+
 import os
 import platform
 import sys
 from pathlib import Path
 from subprocess import CalledProcessError
 from textwrap import dedent
-from typing import List, Union
 
 import pytest
 
@@ -19,8 +20,8 @@ def check_compatibility(anyio_backend_name: str) -> None:
     if anyio_backend_name == "asyncio":
         if platform.system() == "Windows" and sys.version_info < (3, 8):
             pytest.skip(
-                "Python < 3.8 uses SelectorEventLoop by default and it does not support "
-                "subprocesses"
+                "Python < 3.8 uses SelectorEventLoop by default and it does not "
+                "support subprocesses"
             )
 
 
@@ -40,7 +41,7 @@ def check_compatibility(anyio_backend_name: str) -> None:
     ],
 )
 async def test_run_process(
-    shell: bool, command: Union[str, List[str]], anyio_backend_name: str
+    shell: bool, command: str | list[str], anyio_backend_name: str
 ) -> None:
     process = await run_process(command, input=b"abc")
     assert process.returncode == 0
@@ -115,7 +116,10 @@ async def test_process_env() -> None:
     platform.system() == "Windows", reason="Windows does not have os.getsid()"
 )
 async def test_process_new_session_sid() -> None:
-    """Test that start_new_session is successfully passed to the subprocess implementation"""
+    """
+    Test that start_new_session is successfully passed to the subprocess implementation.
+
+    """
     sid = os.getsid(os.getpid())
     cmd = [sys.executable, "-c", "import os; print(os.getsid(os.getpid()))"]
 
@@ -139,7 +143,8 @@ async def test_run_process_connect_to_file(tmp_path: Path) -> None:
                 sys.executable,
                 "-c",
                 "import sys; txt = sys.stdin.read().strip(); "
-                'print("stdin says", repr(txt), "but stderr says NO!", file=sys.stderr); '
+                'print("stdin says", repr(txt), "but stderr says NO!", '
+                "file=sys.stderr); "
                 'print("stdin says", repr(txt), "and stdout says YES!")',
             ],
             stdin=fin,

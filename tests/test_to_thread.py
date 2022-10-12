@@ -1,11 +1,12 @@
+from __future__ import annotations
+
 import asyncio
-import sys
 import threading
 import time
 from concurrent.futures import Future
 from contextvars import ContextVar
 from functools import partial
-from typing import Any, List, NoReturn, Optional
+from typing import Any, NoReturn
 
 import pytest
 import sniffio
@@ -20,11 +21,6 @@ from anyio import (
     to_thread,
     wait_all_tasks_blocked,
 )
-
-if sys.version_info < (3, 7):
-    current_task = asyncio.Task.current_task
-else:
-    current_task = asyncio.current_task
 
 pytestmark = pytest.mark.anyio
 
@@ -96,11 +92,11 @@ async def test_cancel_worker_thread(
     cancellable: bool, expected_last_active: str
 ) -> None:
     """
-    Test that when a task running a worker thread is cancelled, the cancellation is not acted on
-    until the thread finishes.
+    Test that when a task running a worker thread is cancelled, the cancellation is not
+    acted on until the thread finishes.
 
     """
-    last_active: Optional[str] = None
+    last_active: str | None = None
 
     def thread_worker() -> None:
         nonlocal last_active
@@ -156,11 +152,11 @@ async def test_asynclib_detection() -> None:
 
 @pytest.mark.parametrize("anyio_backend", ["asyncio"])
 async def test_asyncio_cancel_native_task() -> None:
-    task: "Optional[asyncio.Task[None]]" = None
+    task: asyncio.Task[None] | None = None
 
     async def run_in_thread() -> None:
         nonlocal task
-        task = current_task()
+        task = asyncio.current_task()
         await to_thread.run_sync(time.sleep, 0.2, cancellable=True)
 
     async with create_task_group() as tg:
@@ -174,9 +170,9 @@ def test_asyncio_no_root_task(asyncio_event_loop: asyncio.AbstractEventLoop) -> 
     """
     Regression test for #264.
 
-    Ensures that to_thread.run_sync() does not raise an error when there is no root task, but
-    instead tries to find the top most parent task by traversing the cancel scope tree, or failing
-    that, uses the current task to set up a shutdown callback.
+    Ensures that to_thread.run_sync() does not raise an error when there is no root
+    task, but instead tries to find the top most parent task by traversing the cancel
+    scope tree, or failing that, uses the current task to set up a shutdown callback.
 
     """
 
@@ -226,7 +222,7 @@ def test_asyncio_run_sync_no_asyncio_run(
     def exception_handler(loop: object, context: Any = None) -> None:
         exceptions.append(context["exception"])
 
-    exceptions: List[BaseException] = []
+    exceptions: list[BaseException] = []
     asyncio_event_loop.set_exception_handler(exception_handler)
     asyncio_event_loop.run_until_complete(to_thread.run_sync(time.sleep, 0))
     assert not exceptions
@@ -260,8 +256,8 @@ def test_asyncio_no_recycle_stopping_worker(
         await event1.wait()
         asyncio_event_loop.call_soon(event2.set)
         await anyio.to_thread.run_sync(time.sleep, 0)
-        # At this point, the worker would be stopped but still in the idle workers pool, so the
-        # following would hang prior to the fix
+        # At this point, the worker would be stopped but still in the idle workers pool,
+        # so the following would hang prior to the fix
         await anyio.to_thread.run_sync(time.sleep, 0)
 
     event1 = asyncio.Event()

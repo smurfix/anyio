@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pytest
 from _pytest.logging import LogCaptureFixture
 from _pytest.pytester import Pytester
@@ -5,10 +7,11 @@ from _pytest.pytester import Pytester
 from anyio import get_all_backends
 
 pytestmark = pytest.mark.filterwarnings(
-    "ignore:The TerminalReporter.writer attribute is deprecated:pytest.PytestDeprecationWarning:"
+    "ignore:The TerminalReporter.writer attribute is deprecated"
+    ":pytest.PytestDeprecationWarning:"
 )
 
-pytest_args = "-v", "-p", "anyio", "-p", "no:asyncio"
+pytest_args = "-v", "-p", "anyio", "-p", "no:asyncio", "-p", "no:trio"
 
 
 def test_plugin(testdir: Pytester) -> None:
@@ -115,7 +118,11 @@ def test_asyncio(testdir: Pytester, caplog: LogCaptureFixture) -> None:
                 await asyncio.sleep(0)
                 return anyio_backend
 
-            def test_class_fixture_in_test_method(self, async_class_fixture, anyio_backend_name):
+            def test_class_fixture_in_test_method(
+                self,
+                async_class_fixture,
+                anyio_backend_name
+            ):
                 assert anyio_backend_name == 'asyncio'
                 assert async_class_fixture == 'asyncio'
 
