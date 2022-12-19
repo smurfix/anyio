@@ -17,8 +17,8 @@ Depends: ${misc:Depends}, ${python3:Depends},
   python3-sniffio (>= 1.1),
   python3-async-generator | python3 (>> 3.7),
   python3-idna (>= 2.8),
-Recommends: python3-trio (>= 0.17),
-Breaks: python3-trio (<< 0.17~),
+Recommends: python3-trio (>= 0.22),
+Breaks: python3-trio (<< 0.22~),
 Description: High level compatibility layer for multiple asynchronous eve
  AnyIO is a asynchronous compatibility API that allows applications and
  libraries written against it to run unmodified on asyncio, curio and trio.
