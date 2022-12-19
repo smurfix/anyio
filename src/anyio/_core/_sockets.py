@@ -136,8 +136,8 @@ async def connect_tcp(
     """
     Connect to a host using the TCP protocol.
 
-    This function implements the stateless version of the Happy Eyeballs algorithm
-    (RFC 6555). If ``address`` is a host name that resolves to multiple IP addresses,
+    This function implements the stateless version of the Happy Eyeballs algorithm (RFC
+    6555). If ``remote_host`` is a host name that resolves to multiple IP addresses,
     each one is tried until one connection attempt succeeds. If the first attempt does
     not connected within 250 milliseconds, a second attempt is started using the next
     address in the list, and so on. On IPv6 enabled systems, an IPv6 address (if
@@ -282,7 +282,7 @@ async def create_tcp_listener(
     :param local_host: IP address of the interface to listen on. If omitted, listen on
         all IPv4 and IPv6 interfaces. To listen on all interfaces on a specific address
         family, use ``0.0.0.0`` for IPv4 or ``::`` for IPv6.
-    :param family: address family (used if ``interface`` was omitted)
+    :param family: address family (used if ``local_host`` was omitted)
     :param backlog: maximum number of queued incoming connections (up to a maximum of
         2**16, or 65536)
     :param reuse_port: ``True`` to allow multiple sockets to bind to the same
@@ -375,7 +375,7 @@ async def create_udp_socket(
     Create a UDP socket.
 
     If ``port`` has been given, the socket will be bound to this port on the local
-    machine,making this socket suitable for providing UDP based services.
+    machine, making this socket suitable for providing UDP based services.
 
     :param family: address family (``AF_INET`` or ``AF_INET6``) – automatically
         determined from ``local_host`` if omitted

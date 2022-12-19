@@ -7,6 +7,8 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
 - **BACKWARDS INCOMPATIBLE** Replaced AnyIO's own ``ExceptionGroup`` class with the PEP
   654 ``BaseExceptionGroup`` and ``ExceptionGroup``
+- **BACKWARDS INCOMPATIBLE** Changes the pytest plugin to run all tests and fixtures in
+  the same task, allowing fixtures to set context variables for tests and other fixtures
 - Bumped minimum version of trio to v0.22
 - Added ``create_unix_datagram_socket`` and ``create_connected_unix_datagram_socket`` to
   create UNIX datagram sockets (PR by Jean Hominal)
@@ -26,10 +28,22 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
   - The ``TaskStatus`` class is now generic, and should be parametrized to indicate the
     type of the value passed to ``task_status.started()``
   - The ``Listener`` class is now covariant in its stream type
+  - ``create_memory_object_stream()`` now allows passing only ``item_type``
+  - Object receive streams are now covariant and object send streams are correspondingly
+    contravariant
 - Fixed ``CapacityLimiter`` on the asyncio backend to order waiting tasks in the FIFO
   order (instead of LIFO) (PR by Conor Stevenson)
 - Fixed ``CancelScope.cancel()`` not working on asyncio if called before entering the
   scope
+- Fixed ``open_signal_receiver()`` inconsistently yielding integers instead of
+  ``signal.Signals`` instances on the ``trio`` backend
+- Fixed ``to_thread.run_sync()`` hanging on asyncio if the target callable raises
+  ``StopIteration``
+- Fixed ``start_blocking_portal()`` raising an unwarranted
+  ``RuntimeError: This portal is not running`` if a task raises an exception that causes
+  the event loop to be closed
+- Fixed ``current_effective_deadline()`` not returning ``-inf`` on asyncio when the
+  currently active cancel scope has been cancelled (PR by Ganden Schaffner)
 
 **3.6.1**
 
