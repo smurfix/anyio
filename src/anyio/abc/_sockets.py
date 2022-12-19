@@ -1,30 +1,20 @@
+from __future__ import annotations
+
 import socket
 from abc import abstractmethod
+from collections.abc import Callable, Collection, Mapping
 from io import IOBase
 from ipaddress import IPv4Address, IPv6Address
 from socket import AddressFamily
 from types import TracebackType
-from typing import (
-    Any,
-    AsyncContextManager,
-    Callable,
-    Collection,
-    Dict,
-    List,
-    Mapping,
-    Optional,
-    Tuple,
-    Type,
-    TypeVar,
-    Union,
-)
+from typing import Any, AsyncContextManager, Tuple, TypeVar, Union
 
 from .._core._typedattr import (
     TypedAttributeProvider,
     TypedAttributeSet,
     typed_attribute,
 )
-from ._streams import ByteStream, Listener, T_Stream, UnreliableObjectStream
+from ._streams import ByteStream, Listener, UnreliableObjectStream
 from ._tasks import TaskGroup
 
 IPAddressType = Union[str, IPv4Address, IPv6Address]
@@ -41,10 +31,10 @@ class _NullAsyncContextManager:
 
     async def __aexit__(
         self,
-        exc_type: Optional[Type[BaseException]],
-        exc_val: Optional[BaseException],
-        exc_tb: Optional[TracebackType],
-    ) -> Optional[bool]:
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> bool | None:
         return None
 
 
@@ -68,7 +58,7 @@ class _SocketProvider(TypedAttributeProvider):
     def extra_attributes(self) -> Mapping[Any, Callable[[], Any]]:
         from .._core._sockets import convert_ipv6_sockaddr as convert
 
-        attributes: Dict[Any, Callable[[], Any]] = {
+        attributes: dict[Any, Callable[[], Any]] = {
             SocketAttribute.family: lambda: self._raw_socket.family,
             SocketAttribute.local_address: lambda: convert(
                 self._raw_socket.getsockname()
@@ -76,9 +66,7 @@ class _SocketProvider(TypedAttributeProvider):
             SocketAttribute.raw_socket: lambda: self._raw_socket,
         }
         try:
-            peername: Optional[Tuple[str, int]] = convert(
-                self._raw_socket.getpeername()
-            )
+            peername: tuple[str, int] | None = convert(self._raw_socket.getpeername())
         except OSError:
             peername = None
 
@@ -113,19 +101,17 @@ class SocketStream(ByteStream, _SocketProvider):
 
 class UNIXSocketStream(SocketStream):
     @abstractmethod
-    async def send_fds(
-        self, message: bytes, fds: Collection[Union[int, IOBase]]
-    ) -> None:
+    async def send_fds(self, message: bytes, fds: Collection[int | IOBase]) -> None:
         """
         Send file descriptors along with a message to the peer.
 
         :param message: a non-empty bytestring
-        :param fds: a collection of files (either numeric file descriptors or open file or socket
-            objects)
+        :param fds: a collection of files (either numeric file descriptors or open file
+            or socket objects)
         """
 
     @abstractmethod
-    async def receive_fds(self, msglen: int, maxfds: int) -> Tuple[bytes, List[int]]:
+    async def receive_fds(self, msglen: int, maxfds: int) -> tuple[bytes, list[int]]:
         """
         Receive file descriptors along with a message from the peer.
 
@@ -147,7 +133,9 @@ class SocketListener(Listener[SocketStream], _SocketProvider):
         """Accept an incoming connection."""
 
     async def serve(
-        self, handler: Callable[[T_Stream], Any], task_group: Optional[TaskGroup] = None
+        self,
+        handler: Callable[[SocketStream], Any],
+        task_group: TaskGroup | None = None,
     ) -> None:
         from .. import create_task_group
 
@@ -172,7 +160,10 @@ class UDPSocket(UnreliableObjectStream[UDPPacketType], _SocketProvider):
     """
 
     async def sendto(self, data: bytes, host: str, port: int) -> None:
-        """Alias for :meth:`~.UnreliableObjectSendStream.send` ((data, (host, port)))."""
+        """
+        Alias for :meth:`~.UnreliableObjectSendStream.send` ((data, (host, port))).
+
+        """
         return await self.send((data, (host, port)))
 
 

@@ -1,12 +1,11 @@
+from __future__ import annotations
+
 from collections import deque
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Deque, Optional, Tuple, Type
-from warnings import warn
 
 from ..lowlevel import cancel_shielded_checkpoint, checkpoint, checkpoint_if_cancelled
-from ._compat import DeprecatedAwaitable
-from ._eventloop import get_asynclib
+from ._eventloop import get_async_backend
 from ._exceptions import BusyResourceError, WouldBlock
 from ._tasks import CancelScope
 from ._testing import TaskInfo, get_current_task
@@ -26,15 +25,16 @@ class CapacityLimiterStatistics:
     """
     :ivar int borrowed_tokens: number of tokens currently borrowed by tasks
     :ivar float total_tokens: total number of available tokens
-    :ivar tuple borrowers: tasks or other objects currently holding tokens borrowed from this
-        limiter
-    :ivar int tasks_waiting: number of tasks waiting on :meth:`~.CapacityLimiter.acquire` or
+    :ivar tuple borrowers: tasks or other objects currently holding tokens borrowed from
+        this limiter
+    :ivar int tasks_waiting: number of tasks waiting on
+        :meth:`~.CapacityLimiter.acquire` or
         :meth:`~.CapacityLimiter.acquire_on_behalf_of`
     """
 
     borrowed_tokens: int
     total_tokens: float
-    borrowers: Tuple[object, ...]
+    borrowers: tuple[object, ...]
     tasks_waiting: int
 
 
@@ -42,13 +42,13 @@ class CapacityLimiterStatistics:
 class LockStatistics:
     """
     :ivar bool locked: flag indicating if this lock is locked or not
-    :ivar ~anyio.TaskInfo owner: task currently holding the lock (or ``None`` if the lock is not
-        held by any task)
+    :ivar ~anyio.TaskInfo owner: task currently holding the lock (or ``None`` if the
+        lock is not held by any task)
     :ivar int tasks_waiting: number of tasks waiting on :meth:`~.Lock.acquire`
     """
 
     locked: bool
-    owner: Optional[TaskInfo]
+    owner: TaskInfo | None
     tasks_waiting: int
 
 
@@ -56,7 +56,8 @@ class LockStatistics:
 class ConditionStatistics:
     """
     :ivar int tasks_waiting: number of tasks blocked on :meth:`~.Condition.wait`
-    :ivar ~anyio.LockStatistics lock_statistics: statistics of the underlying :class:`~.Lock`
+    :ivar ~anyio.LockStatistics lock_statistics: statistics of the underlying
+        :class:`~.Lock`
     """
 
     tasks_waiting: int
@@ -74,10 +75,10 @@ class SemaphoreStatistics:
 
 
 class Event:
-    def __new__(cls) -> "Event":
-        return get_asynclib().Event()
+    def __new__(cls) -> Event:
+        return get_async_backend().create_event()
 
-    def set(self) -> DeprecatedAwaitable:
+    def set(self) -> None:
         """Set the flag, notifying all listeners."""
         raise NotImplementedError
 
@@ -89,7 +90,8 @@ class Event:
         """
         Wait until the flag has been set.
 
-        If the flag has already been set when this method is called, it returns immediately.
+        If the flag has already been set when this method is called, it returns
+        immediately.
 
         """
         raise NotImplementedError
@@ -100,19 +102,19 @@ class Event:
 
 
 class Lock:
-    _owner_task: Optional[TaskInfo] = None
+    _owner_task: TaskInfo | None = None
 
     def __init__(self) -> None:
-        self._waiters: Deque[Tuple[TaskInfo, Event]] = deque()
+        self._waiters: deque[tuple[TaskInfo, Event]] = deque()
 
     async def __aenter__(self) -> None:
         await self.acquire()
 
     async def __aexit__(
         self,
-        exc_type: Optional[Type[BaseException]],
-        exc_val: Optional[BaseException],
-        exc_tb: Optional[TracebackType],
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
     ) -> None:
         self.release()
 
@@ -160,7 +162,7 @@ class Lock:
 
         self._owner_task = task
 
-    def release(self) -> DeprecatedAwaitable:
+    def release(self) -> None:
         """Release the lock."""
         if self._owner_task != get_current_task():
             raise RuntimeError("The current task is not holding this lock")
@@ -170,8 +172,6 @@ class Lock:
             event.set()
         else:
             del self._owner_task
-
-        return DeprecatedAwaitable(self.release)
 
     def locked(self) -> bool:
         """Return True if the lock is currently held."""
@@ -187,20 +187,20 @@ class Lock:
 
 
 class Condition:
-    _owner_task: Optional[TaskInfo] = None
+    _owner_task: TaskInfo | None = None
 
-    def __init__(self, lock: Optional[Lock] = None):
+    def __init__(self, lock: Lock | None = None):
         self._lock = lock or Lock()
-        self._waiters: Deque[Event] = deque()
+        self._waiters: deque[Event] = deque()
 
     async def __aenter__(self) -> None:
         await self.acquire()
 
     async def __aexit__(
         self,
-        exc_type: Optional[Type[BaseException]],
-        exc_val: Optional[BaseException],
-        exc_tb: Optional[TracebackType],
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
     ) -> None:
         self.release()
 
@@ -223,10 +223,9 @@ class Condition:
         self._lock.acquire_nowait()
         self._owner_task = get_current_task()
 
-    def release(self) -> DeprecatedAwaitable:
+    def release(self) -> None:
         """Release the underlying lock."""
         self._lock.release()
-        return DeprecatedAwaitable(self.release)
 
     def locked(self) -> bool:
         """Return True if the lock is set."""
@@ -278,7 +277,7 @@ class Condition:
 
 
 class Semaphore:
-    def __init__(self, initial_value: int, *, max_value: Optional[int] = None):
+    def __init__(self, initial_value: int, *, max_value: int | None = None):
         if not isinstance(initial_value, int):
             raise TypeError("initial_value must be an integer")
         if initial_value < 0:
@@ -293,17 +292,17 @@ class Semaphore:
 
         self._value = initial_value
         self._max_value = max_value
-        self._waiters: Deque[Event] = deque()
+        self._waiters: deque[Event] = deque()
 
-    async def __aenter__(self) -> "Semaphore":
+    async def __aenter__(self) -> Semaphore:
         await self.acquire()
         return self
 
     async def __aexit__(
         self,
-        exc_type: Optional[Type[BaseException]],
-        exc_val: Optional[BaseException],
-        exc_tb: Optional[TracebackType],
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
     ) -> None:
         self.release()
 
@@ -343,7 +342,7 @@ class Semaphore:
 
         self._value -= 1
 
-    def release(self) -> DeprecatedAwaitable:
+    def release(self) -> None:
         """Increment the semaphore value."""
         if self._max_value is not None and self._value == self._max_value:
             raise ValueError("semaphore released too many times")
@@ -353,15 +352,13 @@ class Semaphore:
         else:
             self._value += 1
 
-        return DeprecatedAwaitable(self.release)
-
     @property
     def value(self) -> int:
         """The current value of the semaphore."""
         return self._value
 
     @property
-    def max_value(self) -> Optional[int]:
+    def max_value(self) -> int | None:
         """The maximum value of the semaphore."""
         return self._max_value
 
@@ -375,18 +372,18 @@ class Semaphore:
 
 
 class CapacityLimiter:
-    def __new__(cls, total_tokens: float) -> "CapacityLimiter":
-        return get_asynclib().CapacityLimiter(total_tokens)
+    def __new__(cls, total_tokens: float) -> CapacityLimiter:
+        return get_async_backend().create_capacity_limiter(total_tokens)
 
     async def __aenter__(self) -> None:
         raise NotImplementedError
 
     async def __aexit__(
         self,
-        exc_type: Optional[Type[BaseException]],
-        exc_val: Optional[BaseException],
-        exc_tb: Optional[TracebackType],
-    ) -> Optional[bool]:
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> bool | None:
         raise NotImplementedError
 
     @property
@@ -395,7 +392,8 @@ class CapacityLimiter:
         The total number of tokens available for borrowing.
 
         This is a read-write property. If the total number of tokens is increased, the
-        proportionate number of tasks waiting on this limiter will be granted their tokens.
+        proportionate number of tasks waiting on this limiter will be granted their
+        tokens.
 
         .. versionchanged:: 3.0
             The property is now writable.
@@ -407,14 +405,6 @@ class CapacityLimiter:
     def total_tokens(self, value: float) -> None:
         raise NotImplementedError
 
-    async def set_total_tokens(self, value: float) -> None:
-        warn(
-            "CapacityLimiter.set_total_tokens has been deprecated. Set the value of the"
-            '"total_tokens" attribute directly.',
-            DeprecationWarning,
-        )
-        self.total_tokens = value
-
     @property
     def borrowed_tokens(self) -> int:
         """The number of tokens that have currently been borrowed."""
@@ -425,16 +415,17 @@ class CapacityLimiter:
         """The number of tokens currently available to be borrowed"""
         raise NotImplementedError
 
-    def acquire_nowait(self) -> DeprecatedAwaitable:
+    def acquire_nowait(self) -> None:
         """
-        Acquire a token for the current task without waiting for one to become available.
+        Acquire a token for the current task without waiting for one to become
+        available.
 
         :raises ~anyio.WouldBlock: if there are no tokens available for borrowing
 
         """
         raise NotImplementedError
 
-    def acquire_on_behalf_of_nowait(self, borrower: object) -> DeprecatedAwaitable:
+    def acquire_on_behalf_of_nowait(self, borrower: object) -> None:
         """
         Acquire a token without waiting for one to become available.
 
@@ -446,7 +437,8 @@ class CapacityLimiter:
 
     async def acquire(self) -> None:
         """
-        Acquire a token for the current task, waiting if necessary for one to become available.
+        Acquire a token for the current task, waiting if necessary for one to become
+        available.
 
         """
         raise NotImplementedError
@@ -463,7 +455,8 @@ class CapacityLimiter:
     def release(self) -> None:
         """
         Release the token held by the current task.
-        :raises RuntimeError: if the current task has not borrowed a token from this limiter.
+        :raises RuntimeError: if the current task has not borrowed a token from this
+            limiter.
 
         """
         raise NotImplementedError
@@ -472,7 +465,8 @@ class CapacityLimiter:
         """
         Release the token held by the given borrower.
 
-        :raises RuntimeError: if the borrower has not borrowed a token from this limiter.
+        :raises RuntimeError: if the borrower has not borrowed a token from this
+            limiter.
 
         """
         raise NotImplementedError
@@ -485,91 +479,6 @@ class CapacityLimiter:
 
         """
         raise NotImplementedError
-
-
-def create_lock() -> Lock:
-    """
-    Create an asynchronous lock.
-
-    :return: a lock object
-
-    .. deprecated:: 3.0
-       Use :class:`~Lock` directly.
-
-    """
-    warn("create_lock() is deprecated -- use Lock() directly", DeprecationWarning)
-    return Lock()
-
-
-def create_condition(lock: Optional[Lock] = None) -> Condition:
-    """
-    Create an asynchronous condition.
-
-    :param lock: the lock to base the condition object on
-    :return: a condition object
-
-    .. deprecated:: 3.0
-       Use :class:`~Condition` directly.
-
-    """
-    warn(
-        "create_condition() is deprecated -- use Condition() directly",
-        DeprecationWarning,
-    )
-    return Condition(lock=lock)
-
-
-def create_event() -> Event:
-    """
-    Create an asynchronous event object.
-
-    :return: an event object
-
-    .. deprecated:: 3.0
-       Use :class:`~Event` directly.
-
-    """
-    warn("create_event() is deprecated -- use Event() directly", DeprecationWarning)
-    return get_asynclib().Event()
-
-
-def create_semaphore(value: int, *, max_value: Optional[int] = None) -> Semaphore:
-    """
-    Create an asynchronous semaphore.
-
-    :param value: the semaphore's initial value
-    :param max_value: if set, makes this a "bounded" semaphore that raises :exc:`ValueError` if the
-        semaphore's value would exceed this number
-    :return: a semaphore object
-
-    .. deprecated:: 3.0
-       Use :class:`~Semaphore` directly.
-
-    """
-    warn(
-        "create_semaphore() is deprecated -- use Semaphore() directly",
-        DeprecationWarning,
-    )
-    return Semaphore(value, max_value=max_value)
-
-
-def create_capacity_limiter(total_tokens: float) -> CapacityLimiter:
-    """
-    Create a capacity limiter.
-
-    :param total_tokens: the total number of tokens available for borrowing (can be an integer or
-        :data:`math.inf`)
-    :return: a capacity limiter object
-
-    .. deprecated:: 3.0
-       Use :class:`~CapacityLimiter` directly.
-
-    """
-    warn(
-        "create_capacity_limiter() is deprecated -- use CapacityLimiter() directly",
-        DeprecationWarning,
-    )
-    return get_asynclib().CapacityLimiter(total_tokens)
 
 
 class ResourceGuard:
@@ -587,9 +496,9 @@ class ResourceGuard:
 
     def __exit__(
         self,
-        exc_type: Optional[Type[BaseException]],
-        exc_val: Optional[BaseException],
-        exc_tb: Optional[TracebackType],
-    ) -> Optional[bool]:
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> bool | None:
         self._guarded = False
         return None

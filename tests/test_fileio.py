@@ -1,9 +1,10 @@
+from __future__ import annotations
+
 import os
 import pathlib
 import platform
 import socket
 import stat
-from typing import Tuple
 
 import pytest
 from _pytest.tmpdir import TempPathFactory
@@ -73,7 +74,11 @@ class TestPath:
         return tmp_path
 
     async def test_properties(self) -> None:
-        """Ensure that all public properties and methods are available on the async Path class."""
+        """
+        Ensure that all public properties and methods are available on the async Path
+        class.
+
+        """
         path = pathlib.Path("/test/path/another/part")
         stdlib_properties = {
             p for p in dir(path) if p.startswith("__") or not p.startswith("_")
@@ -279,7 +284,7 @@ class TestPath:
     @pytest.mark.parametrize(
         "args, result", [(("/xyz", "abc"), True), (("/xyz", "baz"), False)]
     )
-    def test_is_relative_to(self, args: Tuple[str], result: bool) -> None:
+    def test_is_relative_to(self, args: tuple[str], result: bool) -> None:
         assert Path("/xyz/abc/foo").is_relative_to(*args) == result
 
     async def test_glob(self, populated_tmpdir: pathlib.Path) -> None:

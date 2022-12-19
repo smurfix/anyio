@@ -1,4 +1,4 @@
-from typing import List, Union
+from __future__ import annotations
 
 import pytest
 
@@ -13,6 +13,7 @@ from anyio import (
     fail_after,
     wait_all_tasks_blocked,
 )
+from anyio.abc import ObjectReceiveStream, ObjectSendStream
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 pytestmark = pytest.mark.anyio
@@ -36,7 +37,7 @@ async def test_receive_then_send() -> None:
         received_objects.append(await receive.receive())
 
     send, receive = create_memory_object_stream(0)
-    received_objects: List[str] = []
+    received_objects: list[str] = []
     async with create_task_group() as tg:
         tg.start_soon(receiver)
         await wait_all_tasks_blocked()
@@ -51,7 +52,7 @@ async def test_receive_then_send_nowait() -> None:
         received_objects.append(await receive.receive())
 
     send, receive = create_memory_object_stream(0)
-    received_objects: List[str] = []
+    received_objects: list[str] = []
     async with create_task_group() as tg:
         tg.start_soon(receiver)
         tg.start_soon(receiver)
@@ -97,7 +98,7 @@ async def test_iterate() -> None:
             received_objects.append(item)
 
     send, receive = create_memory_object_stream()
-    received_objects: List[str] = []
+    received_objects: list[str] = []
     async with create_task_group() as tg:
         tg.start_soon(receiver)
         await send.send("hello")
@@ -194,8 +195,8 @@ async def test_receive_after_send_closed() -> None:
 
 async def test_receive_when_cancelled() -> None:
     """
-    Test that calling receive() in a cancelled scope prevents it from going through with the
-    operation.
+    Test that calling receive() in a cancelled scope prevents it from going through with
+    the operation.
 
     """
     send, receive = create_memory_object_stream()
@@ -215,15 +216,15 @@ async def test_receive_when_cancelled() -> None:
 
 async def test_send_when_cancelled() -> None:
     """
-    Test that calling send() in a cancelled scope prevents it from going through with the
-    operation.
+    Test that calling send() in a cancelled scope prevents it from going through with
+    the operation.
 
     """
 
     async def receiver() -> None:
         received.append(await receive.receive())
 
-    received: List[str] = []
+    received: list[str] = []
     send, receive = create_memory_object_stream()
     async with create_task_group() as tg:
         tg.start_soon(receiver)
@@ -238,8 +239,8 @@ async def test_send_when_cancelled() -> None:
 
 async def test_cancel_during_receive() -> None:
     """
-    Test that cancelling a pending receive() operation does not cause an item in the stream to be
-    lost.
+    Test that cancelling a pending receive() operation does not cause an item in the
+    stream to be lost.
 
     """
     receiver_scope = None
@@ -251,7 +252,7 @@ async def test_cancel_during_receive() -> None:
 
         assert receiver_scope.cancel_called
 
-    received: List[str] = []
+    received: list[str] = []
     send, receive = create_memory_object_stream()
     async with create_task_group() as tg:
         tg.start_soon(scoped_receiver)
@@ -280,9 +281,10 @@ async def test_close_receive_after_send() -> None:
 
 async def test_statistics() -> None:
     send_stream, receive_stream = create_memory_object_stream(1)
-    streams: List[
-        Union[MemoryObjectReceiveStream[int], MemoryObjectSendStream[int]]
-    ] = [send_stream, receive_stream]
+    streams: list[MemoryObjectReceiveStream[int] | MemoryObjectSendStream[int]] = [
+        send_stream,
+        receive_stream,
+    ]
     for stream in streams:
         statistics = stream.statistics()
         assert statistics.max_buffer_size == 1
@@ -344,3 +346,18 @@ async def test_sync_close() -> None:
 
     with pytest.raises(ClosedResourceError):
         receive_stream.receive_nowait()
+
+
+async def test_type_variance() -> None:
+    """
+    This test does not do anything at run time, but since the test suite is also checked
+    with a static type checker, it ensures that the memory object stream
+    co/contravariance works as intended. If it doesn't, one or both of the following
+    reassignments will trip the type checker.
+
+    """
+    send, receive = create_memory_object_stream(item_type=float)
+    receive1: MemoryObjectReceiveStream[complex] = receive  # noqa: F841
+    receive2: ObjectReceiveStream[complex] = receive  # noqa: F841
+    send1: MemoryObjectSendStream[int] = send  # noqa: F841
+    send2: ObjectSendStream[int] = send  # noqa: F841

@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 import asyncio
-from typing import Optional
 
 import pytest
 
@@ -132,7 +133,7 @@ class TestLock:
             async with lock:
                 await asyncio.sleep(0)
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         task1 = loop.create_task(acquire())
         task2 = loop.create_task(acquire())
         await asyncio.sleep(0)
@@ -348,7 +349,7 @@ class TestSemaphore:
         assert semaphore.value == 1
 
     @pytest.mark.parametrize("max_value", [2, None])
-    async def test_max_value(self, max_value: Optional[int]) -> None:
+    async def test_max_value(self, max_value: int | None) -> None:
         semaphore = Semaphore(0, max_value=max_value)
         assert semaphore.max_value == max_value
 
@@ -376,8 +377,9 @@ class TestSemaphore:
 
     async def test_acquire_race(self) -> None:
         """
-        Test against a race condition: when a task waiting on acquire() is rescheduled but another
-        task snatches the last available slot, the task should not raise WouldBlock.
+        Test against a race condition: when a task waiting on acquire() is rescheduled
+        but another task snatches the last available slot, the task should not raise
+        WouldBlock.
 
         """
         semaphore = Semaphore(1)
@@ -397,7 +399,7 @@ class TestSemaphore:
             async with semaphore:
                 await asyncio.sleep(0)
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         task1 = loop.create_task(acquire())
         task2 = loop.create_task(acquire())
         await asyncio.sleep(0)
@@ -518,9 +520,28 @@ class TestCapacityLimiter:
             async with limiter:
                 await asyncio.sleep(0)
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         task1 = loop.create_task(acquire())
         task2 = loop.create_task(acquire())
         await asyncio.sleep(0)
         task1.cancel()
         await asyncio.wait_for(task2, 1)
+
+    async def test_ordered_queue(self) -> None:
+        limiter = CapacityLimiter(1)
+        results = []
+        event = Event()
+
+        async def append(x: int, task_status: TaskStatus) -> None:
+            task_status.started()
+            async with limiter:
+                await event.wait()
+                results.append(x)
+
+        async with create_task_group() as tg:
+            for i in [0, 1, 2]:
+                await tg.start(append, i)
+
+            event.set()
+
+        assert results == [0, 1, 2]

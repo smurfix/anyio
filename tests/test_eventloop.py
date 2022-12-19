@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import asyncio
 import math
 import sys
 
@@ -8,7 +10,7 @@ try:
 except ImportError:
     pass
 
-from anyio import sleep_forever, sleep_until
+from anyio import run, sleep_forever, sleep_until
 
 if sys.version_info < (3, 8):
     from mock import AsyncMock
@@ -40,3 +42,13 @@ async def test_sleep_until_in_past(fake_sleep: AsyncMock) -> None:
 async def test_sleep_forever(fake_sleep: AsyncMock) -> None:
     await sleep_forever()
     fake_sleep.assert_called_once_with(math.inf)
+
+
+def test_run_task() -> None:
+    """Test that anyio.run() on asyncio will work with a callable returning a Future."""
+
+    async def async_add(x: int, y: int) -> int:
+        return x + y
+
+    result = run(asyncio.create_task, async_add(1, 2), backend="asyncio")
+    assert result == 3

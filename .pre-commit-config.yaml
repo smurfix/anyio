@@ -5,7 +5,7 @@
 # * Run "pre-commit install".
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.3.0
+    rev: v4.4.0
     hooks:
       - id: check-toml
       - id: check-yaml
@@ -15,29 +15,32 @@ repos:
         args: [ "--fix=lf" ]
       - id: trailing-whitespace
 
-  - repo: https://github.com/asottile/pyupgrade
-    rev: v2.37.1
-    hooks:
-      - id: pyupgrade
-        args: [ "--py36-plus", "--keep-mock" ]
-
-  - repo: https://github.com/psf/black
-    rev: 22.6.0
-    hooks:
-      - id: black
-
   - repo: https://github.com/pycqa/isort
     rev: 5.10.1
     hooks:
       - id: isort
+        args: [ "-a", "from __future__ import annotations" ]
+        exclude: "docs/conf.py"
+
+  - repo: https://github.com/asottile/pyupgrade
+    rev: v3.3.1
+    hooks:
+      - id: pyupgrade
+        args: [ "--py37-plus", "--keep-mock" ]
+        exclude: "docs/conf.py"
+
+  - repo: https://github.com/psf/black
+    rev: 22.12.0
+    hooks:
+      - id: black
 
   - repo: https://github.com/csachs/pyproject-flake8
-    rev: v0.0.1a4
+    rev: v6.0.0
     hooks:
       - id: pyproject-flake8
 
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v0.961
+    rev: v0.991
     hooks:
       - id: mypy
         additional_dependencies: [ "pytest", "trio-typing", "packaging" ]
