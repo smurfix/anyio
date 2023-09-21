@@ -1,3 +1,9 @@
+anyio (4.0.0) smurf; urgency=medium
+
+  * Release 4.0
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Thu, 21 Sep 2023 09:34:10 +0200
+
 anyio (4.0.0~smurf2) smurf; urgency=medium
 
   * Breaks for Trio < 0.22

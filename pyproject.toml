@@ -43,7 +43,7 @@ Changelog = "https://anyio.readthedocs.io/en/stable/versionhistory.html"
 trio = ["trio >= 0.22"]
 test = [
     "anyio[trio]",
-    "coverage[toml] >= 4.5",
+    "coverage[toml] >= 7",
     "hypothesis >= 4.0",
     "psutil >= 5.9",
     "pytest >= 7.0",
@@ -53,9 +53,7 @@ test = [
 ]
 doc = [
     "packaging",
-    "Sphinx ~= 6.1.0",
-    "sphinx_rtd_theme",
-    "sphinxcontrib-jquery",
+    "Sphinx >= 7",
     "sphinx-autodoc-typehints >= 1.2.0",
 ]
 
@@ -92,6 +90,7 @@ show_error_codes = true
 [tool.pytest.ini_options]
 addopts = "-rsx --tb=short --strict-config --strict-markers -p anyio -p no:asyncio -p no:trio"
 testpaths = ["tests"]
+xfail_strict = true
 # Ignore resource warnings due to a CPython/Windows bug (https://bugs.python.org/issue44428)
 filterwarnings = [
     "error",

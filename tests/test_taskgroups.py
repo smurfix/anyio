@@ -198,6 +198,9 @@ async def test_start_native_host_cancelled() -> None:
         async with create_task_group() as tg:
             await tg.start(taskfunc)
 
+    if sys.version_info < (3, 9):
+        pytest.xfail("Requires a way to detect cancellation source")
+
     task = asyncio.get_running_loop().create_task(start_another())
     await wait_all_tasks_blocked()
     task.cancel()
@@ -257,6 +260,31 @@ async def test_start_exception_delivery(anyio_backend_name: str) -> None:
     async with anyio.create_task_group() as tg:
         with pytest.raises(TypeError, match=pattern):
             await tg.start(task_fn)  # type: ignore[arg-type]
+
+
+async def test_start_cancel_after_error() -> None:
+    """Regression test for #517."""
+    sleep_completed = False
+
+    async def sleep_and_raise() -> None:
+        await wait_all_tasks_blocked()
+        raise RuntimeError("This should cancel the second start() call")
+
+    async def sleep_only(task_status: TaskStatus[None]) -> None:
+        nonlocal sleep_completed
+        await sleep(1)
+        sleep_completed = True
+        task_status.started()
+
+    with pytest.raises(ExceptionGroup) as exc:
+        async with anyio.create_task_group() as outer_tg:
+            async with anyio.create_task_group() as inner_tg:
+                inner_tg.start_soon(sleep_and_raise)
+                await outer_tg.start(sleep_only)
+
+    assert isinstance(exc.value.exceptions[0], ExceptionGroup)
+    assert isinstance(exc.value.exceptions[0].exceptions[0], RuntimeError)
+    assert not sleep_completed
 
 
 async def test_host_exception() -> None:
@@ -1129,6 +1157,28 @@ def test_unhandled_exception_group(caplog: pytest.LogCaptureFixture) -> None:
     assert not caplog.messages
 
 
+async def test_single_cancellation_exc() -> None:
+    """
+    Test that only a single cancellation exception bubbles out of the task group when
+    case it was cancelled via an outer scope and no actual errors were raised.
+
+    """
+    with CancelScope() as outer:
+        try:
+            async with create_task_group() as tg:
+                tg.start_soon(sleep, 5)
+                await wait_all_tasks_blocked()
+                outer.cancel()
+                await sleep(5)
+        except BaseException as exc:
+            if isinstance(exc, get_cancelled_exc_class()):
+                raise
+
+            pytest.fail(f"Raised the wrong type of exception: {exc}")
+        else:
+            pytest.fail("Did not raise a cancellation exception")
+
+
 async def test_start_soon_parent_id() -> None:
     root_task_id = get_current_task().id
     parent_id: int | None = None
@@ -1204,6 +1254,23 @@ class TestUncancel:
         assert task.cancelling() == 1
         task.uncancel()
 
+    async def test_cancel_message_replaced(self) -> None:
+        task = asyncio.current_task()
+        assert task
+        try:
+            task.cancel()
+            await anyio.sleep(0)
+        except asyncio.CancelledError:
+            try:
+                with CancelScope() as scope:
+                    scope.cancel()
+                    try:
+                        await anyio.sleep(0)
+                    except asyncio.CancelledError:
+                        raise asyncio.CancelledError
+            except asyncio.CancelledError:
+                pytest.fail("Should have swallowed the CancelledError")
+
 
 async def test_cancel_before_entering_task_group() -> None:
     with CancelScope() as scope:
@@ -1237,13 +1304,13 @@ class TestTaskStatusTyping:
 
     async def typetest_variance_good(*, task_status: TaskStatus[float]) -> None:
         task_status2: TaskStatus[int] = task_status
-        task_status2.started(int())
+        task_status2.started(0)
 
     async def typetest_variance_bad(*, task_status: TaskStatus[int]) -> None:
         # We use `type: ignore` and `--warn-unused-ignores` to get type checking errors
         # if these ever stop failing.
         task_status2: TaskStatus[float] = task_status  # type: ignore[assignment]
-        task_status2.started(float())
+        task_status2.started(0.0)
 
     async def typetest_optional_status(
         *, task_status: TaskStatus[int] = TASK_STATUS_IGNORED

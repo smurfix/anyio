@@ -3,7 +3,7 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
-**UNRELEASED**
+**4.0.0**
 
 - **BACKWARDS INCOMPATIBLE** Replaced AnyIO's own ``ExceptionGroup`` class with the PEP
   654 ``BaseExceptionGroup`` and ``ExceptionGroup``
@@ -16,6 +16,13 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
     tasks were spawned and an outer cancellation scope had been cancelled before
   - Ensured that exiting a ``TaskGroup`` always hits a yield point, regardless of
     whether there are running child tasks to be waited on
+  - On asyncio, cancel scopes will defer cancelling tasks that are scheduled to resume
+    with a finished future
+  - On asyncio and Python 3.9/3.10, cancel scopes now only suppress cancellation
+    exceptions if the cancel message matches the scope
+  - Task groups on all backends now raise a single cancellation exception when an outer
+    cancel scope is cancelled, and no exceptions other than cancellation exceptions are
+    raised in the group
 - **BACKWARDS INCOMPATIBLE** Changes the pytest plugin to run all tests and fixtures in
   the same task, allowing fixtures to set context variables for tests and other fixtures
 - **BACKWARDS INCOMPATIBLE** Changed ``anyio.Path.relative_to()`` and
@@ -33,12 +40,57 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 - Added the ``anyio.Path.is_junction()`` and ``anyio.Path.walk()`` methods
 - Added ``create_unix_datagram_socket`` and ``create_connected_unix_datagram_socket`` to
   create UNIX datagram sockets (PR by Jean Hominal)
+- Fixed ``from_thread.run`` and ``from_thread.run_sync`` not setting sniffio on asyncio.
+  As a result:
+
+  - Fixed ``from_thread.run_sync`` failing when used to call sniffio-dependent functions
+    on asyncio
+  - Fixed ``from_thread.run`` failing when used to call sniffio-dependent functions on
+    asyncio from a thread running trio or curio
+  - Fixed deadlock when using ``from_thread.start_blocking_portal(backend="asyncio")``
+    in a thread running trio or curio (PR by Ganden Schaffner)
+- Improved type annotations:
+
+  - The ``item_type`` argument of ``create_memory_object_stream`` was deprecated.
+    To indicate the item type handled by the stream, use
+    ``create_memory_object_stream[T_Item]()`` instead. Type checking should no longer
+    fail when annotating memory object streams with uninstantiable item types (PR by
+    Ganden Schaffner)
 - Added the ``CancelScope.cancelled_caught`` property which tells users if the cancel
   scope suppressed a cancellation exception
 - Fixed ``fail_after()`` raising an unwarranted ``TimeoutError`` when the cancel scope
   was cancelled before reaching its deadline
+- Fixed ``MemoryObjectReceiveStream.receive()`` causing the receiving task on asyncio to
+  remain in a cancelled state if the operation was cancelled after an item was queued to
+  be received by the task (but before the task could actually receive the item)
+- Fixed ``TaskGroup.start()`` on asyncio not responding to cancellation from the outside
+- Fixed tasks started from ``BlockingPortal`` not notifying synchronous listeners
+  (``concurrent.futures.wait()``) when they're cancelled
 - Removed unnecessary extra waiting cycle in ``Event.wait()`` on asyncio in the case
   where the event was not yet set
+- Fixed processes spawned by ``anyio.to_process()`` being "lost" as unusable to the
+  process pool when processes that have idled over 5 minutes are pruned at part of the
+  ``to_process.run_sync()`` call, leading to increased memory consumption
+  (PR by Anael Gorfinkel)
+
+Changes since 4.0.0rc1:
+
+- Fixed the type annotation of ``TaskGroup.start_soon()`` to accept any awaitables
+  (already in v3.7.0 but was missing from 4.0.0rc1)
+- Changed ``CancelScope`` to also consider the cancellation count (in addition to the
+  cancel message) on asyncio to determine if a cancellation exception should be
+  swallowed on scope exit, to combat issues where third party libraries catch the
+  ``CancelledError`` and raise another, thus erasing the original cancel message
+- Worked around a `CPython bug <https://github.com/python/cpython/issues/108668>`_ that
+  caused ``TLSListener.handle_handshake_error()`` on asyncio to log ``"NoneType: None"``
+  instead of the error (PR by Ganden Schaffner)
+- Re-added the ``item_type`` argument to ``create_memory_object_stream()`` (but using it
+  raises a deprecation warning and does nothing with regards to the static types of the
+  returned streams)
+- Fixed processes spawned by ``anyio.to_process()`` being "lost" as unusable to the
+  process pool when processes that have idled over 5 minutes are pruned at part of the
+  ``to_process.run_sync()`` call, leading to increased memory consumption
+  (PR by Anael Gorfinkel)
 
 **3.7.1**
 
@@ -51,13 +103,6 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 - Dropped support for Python 3.6
 - Improved type annotations:
 
-  - **BACKWARDS INCOMPATIBLE** ``create_memory_object_stream`` no longer accepts an
-    ``item_type`` argument for static typing. Use
-    ``create_memory_object_stream[T_Item]()`` instead. Type checking should no longer
-    fail when annotating memory object streams with uninstantiable item types (PR by
-    Ganden Schaffner)
-  - Several functions and methods that previously only accepted coroutines as the return
-    type of the callable have been amended to accept any awaitables:
   - Several functions and methods that were previously annotated as accepting
     ``Coroutine[Any, Any, Any]`` as the return type of the callable have been amended to
     accept ``Awaitable[Any]`` instead, to allow a slightly broader set of coroutine-like
@@ -78,6 +123,7 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
   - The ``TaskStatus`` class is now a generic protocol, and should be parametrized to
     indicate the type of the value passed to ``task_status.started()``
   - The ``Listener`` class is now covariant in its stream type
+  - ``create_memory_object_stream()`` now allows passing only ``item_type``
   - Object receive streams are now covariant and object send streams are correspondingly
     contravariant
 - Changed ``TLSAttribute.shared_ciphers`` to match the documented semantics of
@@ -104,15 +150,6 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 - Worked around a `PyPy bug <https://foss.heptapod.net/pypy/pypy/-/issues/3938>`_
   when using ``anyio.getaddrinfo()`` with for IPv6 link-local addresses containing
   interface names
-- Fixed ``from_thread.run`` and ``from_thread.run_sync`` not setting sniffio on asyncio.
-  As a result:
-
-  - Fixed ``from_thread.run_sync`` failing when used to call sniffio-dependent functions
-    on asyncio
-  - Fixed ``from_thread.run`` failing when used to call sniffio-dependent functions on
-    asyncio from a thread running trio or curio
-  - Fixed deadlock when using ``from_thread.start_blocking_portal(backend="asyncio")``
-    in a thread running trio or curio (PR by Ganden Schaffner)
 
 **3.6.2**
 
