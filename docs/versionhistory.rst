@@ -7,15 +7,62 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
 - **BACKWARDS INCOMPATIBLE** Replaced AnyIO's own ``ExceptionGroup`` class with the PEP
   654 ``BaseExceptionGroup`` and ``ExceptionGroup``
+- **BACKWARDS INCOMPATIBLE** Changes to cancellation semantics:
+
+  - Any exceptions raising out of a task groups are now nested inside an
+    ``ExceptionGroup`` (or ``BaseExceptionGroup`` if one or more ``BaseException`` were
+    included)
+  - Fixed task group not raising a cancellation exception on asyncio at exit if no child
+    tasks were spawned and an outer cancellation scope had been cancelled before
+  - Ensured that exiting a ``TaskGroup`` always hits a yield point, regardless of
+    whether there are running child tasks to be waited on
 - **BACKWARDS INCOMPATIBLE** Changes the pytest plugin to run all tests and fixtures in
   the same task, allowing fixtures to set context variables for tests and other fixtures
+- **BACKWARDS INCOMPATIBLE** Changed ``anyio.Path.relative_to()`` and
+  ``anyio.Path.is_relative_to()`` to only accept one argument, as passing multiple
+  arguments is deprecated as of Python 3.12
+- **BACKWARDS INCOMPATIBLE** Dropped support for spawning tasks from old-style coroutine
+  functions (``@asyncio.coroutine``)
+- **BACKWARDS INCOMPATIBLE** The ``policy`` option on the ``asyncio`` backend was
+  changed to ``loop_factory`` to accommodate ``asyncio.Runner``
+- Changed ``anyio.run()`` to use ``asyncio.Runner`` (or a back-ported version of it on
+  Pythons older than 3.11) on the ``asyncio`` backend
+- Dropped support for Python 3.7
+- Added support for Python 3.12
 - Bumped minimum version of trio to v0.22
+- Added the ``anyio.Path.is_junction()`` and ``anyio.Path.walk()`` methods
 - Added ``create_unix_datagram_socket`` and ``create_connected_unix_datagram_socket`` to
   create UNIX datagram sockets (PR by Jean Hominal)
+- Added the ``CancelScope.cancelled_caught`` property which tells users if the cancel
+  scope suppressed a cancellation exception
+- Fixed ``fail_after()`` raising an unwarranted ``TimeoutError`` when the cancel scope
+  was cancelled before reaching its deadline
+- Removed unnecessary extra waiting cycle in ``Event.wait()`` on asyncio in the case
+  where the event was not yet set
+
+**3.7.1**
+
+- Fixed sending large buffers via UNIX stream sockets on asyncio
+- Fixed several minor documentation issues (broken links to classes, missing classes or
+  attributes)
+
+**3.7.0**
+
+- Dropped support for Python 3.6
 - Improved type annotations:
 
+  - **BACKWARDS INCOMPATIBLE** ``create_memory_object_stream`` no longer accepts an
+    ``item_type`` argument for static typing. Use
+    ``create_memory_object_stream[T_Item]()`` instead. Type checking should no longer
+    fail when annotating memory object streams with uninstantiable item types (PR by
+    Ganden Schaffner)
   - Several functions and methods that previously only accepted coroutines as the return
     type of the callable have been amended to accept any awaitables:
+  - Several functions and methods that were previously annotated as accepting
+    ``Coroutine[Any, Any, Any]`` as the return type of the callable have been amended to
+    accept ``Awaitable[Any]`` instead, to allow a slightly broader set of coroutine-like
+    inputs, like ``async_generator_asend`` objects returned from the ``asend()`` method
+    of async generators, and to match the ``trio`` annotations:
 
     - ``anyio.run()``
     - ``anyio.from_thread.run()``
@@ -25,12 +72,16 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
     - ``BlockingPortal.start_task_soon()``
     - ``BlockingPortal.start_task()``
 
-  - The ``TaskStatus`` class is now generic, and should be parametrized to indicate the
-    type of the value passed to ``task_status.started()``
+    Note that this change involved only changing the type annotations; run-time
+    functionality was not altered.
+
+  - The ``TaskStatus`` class is now a generic protocol, and should be parametrized to
+    indicate the type of the value passed to ``task_status.started()``
   - The ``Listener`` class is now covariant in its stream type
-  - ``create_memory_object_stream()`` now allows passing only ``item_type``
   - Object receive streams are now covariant and object send streams are correspondingly
     contravariant
+- Changed ``TLSAttribute.shared_ciphers`` to match the documented semantics of
+  ``SSLSocket.shared_ciphers`` of always returning ``None`` for client-side streams
 - Fixed ``CapacityLimiter`` on the asyncio backend to order waiting tasks in the FIFO
   order (instead of LIFO) (PR by Conor Stevenson)
 - Fixed ``CancelScope.cancel()`` not working on asyncio if called before entering the
@@ -44,6 +95,29 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
   the event loop to be closed
 - Fixed ``current_effective_deadline()`` not returning ``-inf`` on asyncio when the
   currently active cancel scope has been cancelled (PR by Ganden Schaffner)
+- Fixed the ``OP_IGNORE_UNEXPECTED_EOF`` flag in an SSL context created by default in
+  ``TLSStream.wrap()`` being inadvertently set on Python 3.11.3 and 3.10.11
+- Fixed ``CancelScope`` to properly handle asyncio task uncancellation on Python 3.11
+  (PR by Nikolay Bryskin)
+- Fixed ``OSError`` when trying to use ``create_tcp_listener()`` to bind to a link-local
+  IPv6 address (and worked around related bugs in ``uvloop``)
+- Worked around a `PyPy bug <https://foss.heptapod.net/pypy/pypy/-/issues/3938>`_
+  when using ``anyio.getaddrinfo()`` with for IPv6 link-local addresses containing
+  interface names
+- Fixed ``from_thread.run`` and ``from_thread.run_sync`` not setting sniffio on asyncio.
+  As a result:
+
+  - Fixed ``from_thread.run_sync`` failing when used to call sniffio-dependent functions
+    on asyncio
+  - Fixed ``from_thread.run`` failing when used to call sniffio-dependent functions on
+    asyncio from a thread running trio or curio
+  - Fixed deadlock when using ``from_thread.start_blocking_portal(backend="asyncio")``
+    in a thread running trio or curio (PR by Ganden Schaffner)
+
+**3.6.2**
+
+- Pinned Trio to < 0.22 to avoid incompatibility with AnyIO's ``ExceptionGroup`` class
+  causing ``AttributeError: 'NonBaseMultiError' object has no attribute '_exceptions'``
 
 **3.6.1**
 

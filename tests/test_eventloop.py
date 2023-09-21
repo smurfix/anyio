@@ -13,7 +13,7 @@ except ImportError:
 from anyio import run, sleep_forever, sleep_until
 
 if sys.version_info < (3, 8):
-    from mock import AsyncMock
+    from unittest.mock import AsyncMock
 else:
     from unittest.mock import AsyncMock
 
