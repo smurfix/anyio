@@ -127,18 +127,34 @@ If you need to set local variables in the handlers, declare them as ``nonlocal``
         nonlocal somevariable
         somevariable = 'whatever'
 
-.. _exceptiongroup:: https://pypi.org/project/exceptiongroup/
+.. _exceptiongroup: https://pypi.org/project/exceptiongroup/
 
 Context propagation
 -------------------
 
 Whenever a new task is spawned, `context`_ will be copied to the new task. It is important to note
-*which* content will be copied to the newly spawned task. It is not the context of the task group's
+*which* context will be copied to the newly spawned task. It is not the context of the task group's
 host task that will be copied, but the context of the task that calls
 :meth:`TaskGroup.start() <.abc.TaskGroup.start>` or
 :meth:`TaskGroup.start_soon() <.abc.TaskGroup.start_soon>`.
 
-.. note:: Context propagation **does not work** on asyncio when using Python 3.6, as asyncio
-    support for this only landed in v3.7.
-
 .. _context: https://docs.python.org/3/library/contextvars.html
+
+Differences with asyncio.TaskGroup
+----------------------------------
+
+The :class:`asyncio.TaskGroup` class, added in Python 3.11, is very similar in design to
+the AnyIO :class:`~TaskGroup` class. The asyncio counterpart has some important
+differences in its semantics, however:
+
+* Tasks are spawned solely through :meth:`~asyncio.TaskGroup.create_task`; there is no
+  ``start()`` or ``start_soon()`` method
+* The :meth:`~asyncio.TaskGroup.create_task` method returns a task object which can be
+  awaited on (or cancelled)
+* Tasks spawned via :meth:`~asyncio.TaskGroup.create_task` can only be cancelled
+  individually (there is no ``cancel()`` method or similar in the task group)
+* When a task spawned via :meth:`~asyncio.TaskGroup.create_task` is cancelled before its
+  coroutine has started running, it will not get a chance to handle the cancellation
+  exception
+* :class:`asyncio.TaskGroup` does not allow starting new tasks after an exception in
+  one of the tasks has triggered a shutdown of the task group

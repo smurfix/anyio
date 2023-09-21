@@ -16,6 +16,7 @@ from ssl import SSLContext, SSLError
 from threading import Thread
 from typing import Any, Iterable, Iterator, NoReturn, TypeVar, cast
 
+import psutil
 import pytest
 from _pytest.fixtures import SubRequest
 from _pytest.logging import LogCaptureFixture
@@ -56,10 +57,7 @@ from anyio.streams.stapled import MultiListener
 if sys.version_info < (3, 11):
     from exceptiongroup import ExceptionGroup
 
-if sys.version_info >= (3, 8):
-    from typing import Literal
-else:
-    from typing_extensions import Literal
+from typing import Literal
 
 AnyIPAddressFamily = Literal[
     AddressFamily.AF_UNSPEC, AddressFamily.AF_INET, AddressFamily.AF_INET6
@@ -82,6 +80,8 @@ if socket.has_ipv6:
     else:
         has_ipv6 = True
 
+skip_ipv6_mark = pytest.mark.skipif(not has_ipv6, reason="IPv6 is not available")
+
 
 @pytest.fixture
 def fake_localhost_dns(monkeypatch: MonkeyPatch) -> None:
@@ -97,11 +97,7 @@ def fake_localhost_dns(monkeypatch: MonkeyPatch) -> None:
 @pytest.fixture(
     params=[
         pytest.param(AddressFamily.AF_INET, id="ipv4"),
-        pytest.param(
-            AddressFamily.AF_INET6,
-            id="ipv6",
-            marks=[pytest.mark.skipif(not has_ipv6, reason="no IPv6 support")],
-        ),
+        pytest.param(AddressFamily.AF_INET6, id="ipv6", marks=[skip_ipv6_mark]),
     ]
 )
 def family(request: SubRequest) -> AnyIPAddressFamily:
@@ -264,7 +260,7 @@ class TestTCPStream:
             raw_socket = stream.extra(SocketAttribute.raw_socket)
             assert raw_socket.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0
 
-    @pytest.mark.skipif(not has_ipv6, reason="IPv6 is not available")
+    @skip_ipv6_mark
     @pytest.mark.parametrize(
         "local_addr, expected_client_addr",
         [
@@ -306,12 +302,7 @@ class TestTCPStream:
         "target, exception_class",
         [
             pytest.param(
-                "localhost",
-                ExceptionGroup,
-                id="multi",
-                marks=[
-                    pytest.mark.skipif(not has_ipv6, reason="IPv6 is not available")
-                ],
+                "localhost", ExceptionGroup, id="multi", marks=[skip_ipv6_mark]
             ),
             pytest.param("127.0.0.1", ConnectionRefusedError, id="single"),
         ],
@@ -552,16 +543,8 @@ class TestTCPListener:
         "family",
         [
             pytest.param(AddressFamily.AF_INET, id="ipv4"),
-            pytest.param(
-                AddressFamily.AF_INET6,
-                id="ipv6",
-                marks=[pytest.mark.skipif(not has_ipv6, reason="no IPv6 support")],
-            ),
-            pytest.param(
-                socket.AF_UNSPEC,
-                id="both",
-                marks=[pytest.mark.skipif(not has_ipv6, reason="no IPv6 support")],
-            ),
+            pytest.param(AddressFamily.AF_INET6, id="ipv6", marks=[skip_ipv6_mark]),
+            pytest.param(socket.AF_UNSPEC, id="both", marks=[skip_ipv6_mark]),
         ],
     )
     async def test_accept(self, family: AnyIPAddressFamily) -> None:
@@ -657,12 +640,18 @@ class TestTCPListener:
 
     async def test_close_from_other_task(self, family: AnyIPAddressFamily) -> None:
         listener = await create_tcp_listener(local_host="localhost", family=family)
-        with pytest.raises(ClosedResourceError):
+        with pytest.raises(ExceptionGroup) as exc:
             async with create_task_group() as tg:
                 tg.start_soon(listener.serve, lambda stream: None)
                 await wait_all_tasks_blocked()
                 await listener.aclose()
                 tg.cancel_scope.cancel()
+
+        assert len(exc.value.exceptions) == 1
+        assert isinstance(exc.value.exceptions[0], ExceptionGroup)
+        nested_grp = exc.value.exceptions[0]
+        assert len(nested_grp.exceptions) == 1
+        assert isinstance(nested_grp.exceptions[0], ExceptionGroup)
 
     async def test_send_after_eof(self, family: AnyIPAddressFamily) -> None:
         async def handle(stream: SocketStream) -> None:
@@ -689,6 +678,28 @@ class TestTCPListener:
                             break
 
             tg.cancel_scope.cancel()
+
+    @skip_ipv6_mark
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Windows does not support interface name suffixes",
+    )
+    async def test_bind_link_local(self) -> None:
+        # Regression test for #554
+        link_local_ipv6_address = next(
+            (
+                addr.address
+                for addresses in psutil.net_if_addrs().values()
+                for addr in addresses
+                if addr.address.startswith("fe80::") and "%" in addr.address
+            ),
+            None,
+        )
+        if link_local_ipv6_address is None:
+            pytest.fail("Could not find a link-local IPv6 interface")
+
+        async with await create_tcp_listener(local_host=link_local_ipv6_address):
+            pass
 
 
 @pytest.mark.skipif(
@@ -742,7 +753,7 @@ class TestUNIXStream:
 
         assert response == b"halb"
 
-    async def test_send_large_buffer(
+    async def test_receive_large_buffer(
         self, server_sock: socket.socket, socket_path: Path
     ) -> None:
         def serve() -> None:
@@ -751,7 +762,7 @@ class TestUNIXStream:
             client.close()
 
         buffer = (
-            b"\xff" * 1024 * 1024
+            b"\xff" * 1024 * 512 + b"\x00" * 1024 * 512
         )  # should exceed the maximum kernel send buffer size
         async with await connect_unix(socket_path) as stream:
             thread = Thread(target=serve, daemon=True)
@@ -759,6 +770,34 @@ class TestUNIXStream:
             response = b""
             while len(response) < len(buffer):
                 response += await stream.receive()
+
+        thread.join()
+        assert response == buffer
+
+    async def test_send_large_buffer(
+        self, server_sock: socket.socket, socket_path: Path
+    ) -> None:
+        response = b""
+
+        def serve() -> None:
+            nonlocal response
+            client, _ = server_sock.accept()
+            while True:
+                data = client.recv(1024)
+                if not data:
+                    break
+
+                response += data
+
+            client.close()
+
+        buffer = (
+            b"\xff" * 1024 * 512 + b"\x00" * 1024 * 512
+        )  # should exceed the maximum kernel send buffer size
+        async with await connect_unix(socket_path) as stream:
+            thread = Thread(target=serve, daemon=True)
+            thread.start()
+            await stream.send(buffer)
 
         thread.join()
         assert response == buffer

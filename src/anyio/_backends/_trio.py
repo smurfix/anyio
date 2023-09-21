@@ -3,6 +3,7 @@ from __future__ import annotations
 import array
 import math
 import socket
+import types
 from collections.abc import AsyncIterator, Iterable
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -51,7 +52,7 @@ from .._core._exceptions import (
     ClosedResourceError,
     EndOfStream,
 )
-from .._core._sockets import GetAddrInfoReturnType, convert_ipv6_sockaddr
+from .._core._sockets import convert_ipv6_sockaddr
 from .._core._streams import create_memory_object_stream
 from .._core._synchronization import CapacityLimiter as BaseCapacityLimiter
 from .._core._synchronization import Event as BaseEvent
@@ -97,7 +98,10 @@ class CancelScope(BaseCancelScope):
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> bool | None:
-        return self.__original.__exit__(exc_type, exc_val, exc_tb)
+        # https://github.com/python-trio/trio-typing/pull/79
+        return self.__original.__exit__(  # type: ignore[func-returns-value]
+            exc_type, exc_val, exc_tb
+        )
 
     def cancel(self) -> None:
         self.__original.cancel()
@@ -113,6 +117,10 @@ class CancelScope(BaseCancelScope):
     @property
     def cancel_called(self) -> bool:
         return self.__original.cancel_called
+
+    @property
+    def cancelled_caught(self) -> bool:
+        return self.__original.cancelled_caught
 
     @property
     def shield(self) -> bool:
@@ -131,7 +139,7 @@ class CancelScope(BaseCancelScope):
 class TaskGroup(abc.TaskGroup):
     def __init__(self) -> None:
         self._active = False
-        self._nursery_manager = trio.open_nursery()
+        self._nursery_manager = trio.open_nursery(strict_exception_groups=True)
         self.cancel_scope = None  # type: ignore[assignment]
 
     async def __aenter__(self) -> TaskGroup:
@@ -304,8 +312,7 @@ current_default_worker_process_limiter: trio.lowlevel.RunVar = RunVar(
 )
 
 
-async def _shutdown_process_pool(workers: set[Process]) -> None:
-    process: Process
+async def _shutdown_process_pool(workers: set[abc.Process]) -> None:
     try:
         await trio.sleep(math.inf)
     except trio.Cancelled:
@@ -711,6 +718,17 @@ class TestRunner(abc.TestRunner):
         self._send_stream: MemoryObjectSendStream | None = None
         self._options = options
 
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: types.TracebackType | None,
+    ) -> None:
+        if self._send_stream:
+            self._send_stream.close()
+            while self._send_stream is not None:
+                self._call_queue.get()()
+
     async def _run_tests_and_fixtures(self) -> None:
         self._send_stream, receive_stream = create_memory_object_stream(1)
         with receive_stream:
@@ -744,12 +762,6 @@ class TestRunner(abc.TestRunner):
             self._call_queue.get()()
 
         return outcome_holder[0].unwrap()
-
-    def close(self) -> None:
-        if self._send_stream:
-            self._send_stream.close()
-            while self._send_stream is not None:
-                self._call_queue.get()()
 
     def run_asyncgen_fixture(
         self,
@@ -894,8 +906,8 @@ class TrioBackend(AsyncBackend):
         env: Mapping[str, str] | None = None,
         start_new_session: bool = False,
     ) -> Process:
-        process = await trio.lowlevel.open_process(  # type: ignore[attr-defined]
-            command,
+        process = await trio.lowlevel.open_process(  # type: ignore[misc]
+            command,  # type: ignore[arg-type]
             stdin=stdin,
             stdout=stdout,
             stderr=stderr,
@@ -1008,20 +1020,22 @@ class TrioBackend(AsyncBackend):
         type: int | SocketKind = 0,
         proto: int = 0,
         flags: int = 0,
-    ) -> GetAddrInfoReturnType:
-        # https://github.com/python-trio/trio-typing/pull/57
-        return await trio.socket.getaddrinfo(  # type: ignore[return-value]
-            host, port, family, type, proto, flags  # type: ignore[arg-type]
-        )
+    ) -> list[
+        tuple[
+            AddressFamily,
+            SocketKind,
+            int,
+            str,
+            tuple[str, int] | tuple[str, int, int, int],
+        ]
+    ]:
+        return await trio.socket.getaddrinfo(host, port, family, type, proto, flags)
 
     @classmethod
     async def getnameinfo(
         cls, sockaddr: IPSockAddrType, flags: int = 0
     ) -> tuple[str, str]:
-        # https://github.com/python-trio/trio-typing/pull/56
-        return await trio.socket.getnameinfo(  # type: ignore[return-value]
-            sockaddr, flags
-        )
+        return await trio.socket.getnameinfo(sockaddr, flags)
 
     @classmethod
     async def wait_socket_readable(cls, sock: socket.socket) -> None:
