@@ -1,3 +1,9 @@
+anyio (4.0.0.1) smurf; urgency=medium
+
+  * Dep update.
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Thu, 21 Sep 2023 09:36:57 +0200
+
 anyio (4.0.0) smurf; urgency=medium
 
   * Release 4.0
