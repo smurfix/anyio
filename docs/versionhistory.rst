@@ -3,6 +3,33 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
+**UNRELEASED**
+
+- Add support for ``byte``-based paths in ``connect_unix``, ``create_unix_listeners``,
+  ``create_unix_datagram_socket``, and ``create_connected_unix_datagram_socket``. (PR by
+  Lura Skye.)
+
+**4.1.0**
+
+- Adapted to API changes made in Trio v0.23:
+
+  - Call ``trio.to_thread.run_sync()`` using the ``abandon_on_cancel`` keyword argument
+    instead of ``cancellable``
+  - Removed a checkpoint when exiting a task group
+  - Renamed the ``cancellable`` argument in ``anyio.to_thread.run_sync()`` to
+    ``abandon_on_cancel`` (and deprecated the old parameter name)
+  - Bumped minimum version of Trio to v0.23
+- Added support for voluntary thread cancellation via
+  ``anyio.from_thread.check_cancelled()``
+- Bumped minimum version of trio to v0.23
+- Exposed the ``ResourceGuard`` class in the public API
+  (`#627 <https://github.com/agronholm/anyio/issues/627>`_)
+- Fixed ``RuntimeError: Runner is closed`` when running higher-scoped async generator
+  fixtures in some cases (`#619 <https://github.com/agronholm/anyio/issues/619>`_)
+- Fixed discrepancy between ``asyncio`` and ``trio`` where reraising a cancellation
+  exception in an ``except*`` block would incorrectly bubble out of its cancel scope
+  (`#634 <https://github.com/agronholm/anyio/issues/634>`_)
+
 **4.0.0**
 
 - **BACKWARDS INCOMPATIBLE** Replaced AnyIO's own ``ExceptionGroup`` class with the PEP
