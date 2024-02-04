@@ -15,7 +15,6 @@ from typing import (
     AsyncIterator,
     Final,
     Generic,
-    cast,
     overload,
 )
 
@@ -211,7 +210,7 @@ class _PathIterator(AsyncIterator["Path"]):
         if nextval is None:
             raise StopAsyncIteration from None
 
-        return Path(cast("PathLike[str]", nextval))
+        return Path(nextval)
 
 
 class Path:
@@ -293,26 +292,26 @@ class Path:
         target = other._path if isinstance(other, Path) else other
         return self._path.__eq__(target)
 
-    def __lt__(self, other: Path) -> bool:
+    def __lt__(self, other: pathlib.PurePath | Path) -> bool:
         target = other._path if isinstance(other, Path) else other
         return self._path.__lt__(target)
 
-    def __le__(self, other: Path) -> bool:
+    def __le__(self, other: pathlib.PurePath | Path) -> bool:
         target = other._path if isinstance(other, Path) else other
         return self._path.__le__(target)
 
-    def __gt__(self, other: Path) -> bool:
+    def __gt__(self, other: pathlib.PurePath | Path) -> bool:
         target = other._path if isinstance(other, Path) else other
         return self._path.__gt__(target)
 
-    def __ge__(self, other: Path) -> bool:
+    def __ge__(self, other: pathlib.PurePath | Path) -> bool:
         target = other._path if isinstance(other, Path) else other
         return self._path.__ge__(target)
 
-    def __truediv__(self, other: Any) -> Path:
+    def __truediv__(self, other: str | PathLike[str]) -> Path:
         return Path(self._path / other)
 
-    def __rtruediv__(self, other: Any) -> Path:
+    def __rtruediv__(self, other: str | PathLike[str]) -> Path:
         return Path(other) / self
 
     @property
@@ -402,7 +401,9 @@ class Path:
     async def group(self) -> str:
         return await to_thread.run_sync(self._path.group, abandon_on_cancel=True)
 
-    async def hardlink_to(self, target: str | pathlib.Path | Path) -> None:
+    async def hardlink_to(
+        self, target: str | bytes | PathLike[str] | PathLike[bytes]
+    ) -> None:
         if isinstance(target, Path):
             target = target._path
 
@@ -518,7 +519,7 @@ class Path:
 
     async def readlink(self) -> Path:
         target = await to_thread.run_sync(os.readlink, self._path)
-        return Path(cast(str, target))
+        return Path(target)
 
     async def rename(self, target: str | pathlib.PurePath | Path) -> Path:
         if isinstance(target, Path):
@@ -545,9 +546,7 @@ class Path:
     async def rmdir(self) -> None:
         await to_thread.run_sync(self._path.rmdir)
 
-    async def samefile(
-        self, other_path: str | bytes | int | pathlib.Path | Path
-    ) -> bool:
+    async def samefile(self, other_path: str | PathLike[str]) -> bool:
         if isinstance(other_path, Path):
             other_path = other_path._path
 
@@ -561,7 +560,7 @@ class Path:
 
     async def symlink_to(
         self,
-        target: str | pathlib.Path | Path,
+        target: str | bytes | PathLike[str] | PathLike[bytes],
         target_is_directory: bool = False,
     ) -> None:
         if isinstance(target, Path):
@@ -611,7 +610,7 @@ class Path:
     def with_suffix(self, suffix: str) -> Path:
         return Path(self._path.with_suffix(suffix))
 
-    def with_segments(self, *pathsegments: str) -> Path:
+    def with_segments(self, *pathsegments: str | PathLike[str]) -> Path:
         return Path(*pathsegments)
 
     async def write_bytes(self, data: bytes) -> int:

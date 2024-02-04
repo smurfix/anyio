@@ -3,11 +3,51 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
-**UNRELEASED**
+**4.2.0**
 
 - Add support for ``byte``-based paths in ``connect_unix``, ``create_unix_listeners``,
   ``create_unix_datagram_socket``, and ``create_connected_unix_datagram_socket``. (PR by
-  Lura Skye.)
+  Lura Skye)
+- Enabled the ``Event`` and ``CapacityLimiter`` classes to be instantiated outside an
+  event loop thread
+- Broadly improved/fixed the type annotations. Among other things, many functions and
+  methods that take variadic positional arguments now make use of PEP 646
+  ``TypeVarTuple`` to allow the positional arguments to be validated by static type
+  checkers. These changes affected numerous methods and functions, including:
+
+  * ``anyio.run()``
+  * ``TaskGroup.start_soon()``
+  * ``anyio.from_thread.run()``
+  * ``anyio.from_thread.run_sync()``
+  * ``anyio.to_thread.run_sync()``
+  * ``anyio.to_process.run_sync()``
+  * ``BlockingPortal.call()``
+  * ``BlockingPortal.start_task_soon()``
+  * ``BlockingPortal.start_task()``
+
+  (also resolves `#560 <https://github.com/agronholm/anyio/issues/560>`_)
+- Fixed various type annotations of ``anyio.Path`` to match Typeshed:
+
+  * ``anyio.Path.__lt__()``
+  * ``anyio.Path.__le__()``
+  * ``anyio.Path.__gt__()``
+  * ``anyio.Path.__ge__()``
+  * ``anyio.Path.__truediv__()``
+  * ``anyio.Path.__rtruediv__()``
+  * ``anyio.Path.hardlink_to()``
+  * ``anyio.Path.samefile()``
+  * ``anyio.Path.symlink_to()``
+  * ``anyio.Path.with_segments()``
+
+  (PR by Ganden Schaffner)
+- Fixed adjusting the total number of tokens in a ``CapacityLimiter`` on asyncio failing
+  to wake up tasks waiting to acquire the limiter in certain edge cases (fixed with help
+  from Egor Blagov)
+- Fixed ``loop_factory`` and ``use_uvloop`` options not being used on the asyncio
+  backend (`#643 <https://github.com/agronholm/anyio/issues/643>`_)
+- Fixed cancellation propagating on asyncio from a task group to child tasks if the task
+  hosting the task group is in a shielded cancel scope
+  (`#642 <https://github.com/agronholm/anyio/issues/642>`_)
 
 **4.1.0**
 
