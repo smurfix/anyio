@@ -3,6 +3,72 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
+**4.4.0**
+
+- Added the ``BlockingPortalProvider`` class to aid with constructing synchronous
+  counterparts to asynchronous interfaces that would otherwise require multiple blocking
+  portals
+- Added ``__slots__`` to ``AsyncResource`` so that child classes can use ``__slots__``
+  (`#733 <https://github.com/agronholm/anyio/pull/733>`_; PR by Justin Su)
+- Added the ``TaskInfo.has_pending_cancellation()`` method
+- Fixed erroneous ``RuntimeError: called 'started' twice on the same task status``
+  when cancelling a task in a TaskGroup created with the ``start()`` method before
+  the first checkpoint is reached after calling ``task_status.started()``
+  (`#706 <https://github.com/agronholm/anyio/issues/706>`_; PR by Dominik Schwabe)
+- Fixed two bugs with ``TaskGroup.start()`` on asyncio:
+
+  * Fixed erroneous ``RuntimeError: called 'started' twice on the same task status``
+    when cancelling a task in a TaskGroup created with the ``start()`` method before
+    the first checkpoint is reached after calling ``task_status.started()``
+    (`#706 <https://github.com/agronholm/anyio/issues/706>`_; PR by Dominik Schwabe)
+  * Fixed the entire task group being cancelled if a ``TaskGroup.start()`` call gets
+    cancelled (`#685 <https://github.com/agronholm/anyio/issues/685>`_,
+    `#710 <https://github.com/agronholm/anyio/issues/710>`_)
+- Fixed a race condition that caused crashes when multiple event loops of the same
+  backend were running in separate threads and simultaneously attempted to use AnyIO for
+  their first time (`#425 <https://github.com/agronholm/anyio/issues/425>`_; PR by David
+  Jiricek and Ganden Schaffner)
+- Fixed cancellation delivery on asyncio incrementing the wrong cancel scope's
+  cancellation counter when cascading a cancel operation to a child scope, thus failing
+  to uncancel the host task (`#716 <https://github.com/agronholm/anyio/issues/716>`_)
+- Fixed erroneous ``TypedAttributeLookupError`` if a typed attribute getter raises
+  ``KeyError``
+- Fixed the asyncio backend not respecting the ``PYTHONASYNCIODEBUG`` environment
+  variable when setting the ``debug`` flag in ``anyio.run()``
+- Fixed ``SocketStream.receive()`` not detecting EOF on asyncio if there is also data in
+  the read buffer (`#701 <https://github.com/agronholm/anyio/issues/701>`_)
+- Fixed ``MemoryObjectStream`` dropping an item if the item is delivered to a recipient
+  that is waiting to receive an item but has a cancellation pending
+  (`#728 <https://github.com/agronholm/anyio/issues/728>`_)
+- Emit a ``ResourceWarning`` for ``MemoryObjectReceiveStream`` and
+  ``MemoryObjectSendStream`` that were garbage collected without being closed (PR by
+  Andrey Kazantcev)
+- Fixed ``MemoryObjectSendStream.send()`` not raising ``BrokenResourceError`` when the
+  last corresponding ``MemoryObjectReceiveStream`` is closed while waiting to send a
+  falsey item (`#731 <https://github.com/agronholm/anyio/issues/731>`_; PR by Ganden
+  Schaffner)
+
+**4.3.0**
+
+- Added support for the Python 3.12 ``walk_up`` keyword argument in
+  ``anyio.Path.relative_to()`` (PR by Colin Taylor)
+- Fixed passing ``total_tokens`` to ``anyio.CapacityLimiter()`` as a keyword argument
+  not working on the ``trio`` backend
+  (`#515 <https://github.com/agronholm/anyio/issues/515>`_)
+- Fixed ``Process.aclose()`` not performing the minimum level of necessary cleanup when
+  cancelled. Previously:
+
+  - Cancellation of ``Process.aclose()`` could leak an orphan process
+  - Cancellation of ``run_process()`` could very briefly leak an orphan process.
+  - Cancellation of ``Process.aclose()`` or ``run_process()`` on Trio could leave
+    standard streams unclosed
+
+  (PR by Ganden Schaffner)
+- Fixed ``Process.stdin.aclose()``, ``Process.stdout.aclose()``, and
+  ``Process.stderr.aclose()`` not including a checkpoint on asyncio (PR by Ganden
+  Schaffner)
+- Fixed documentation on how to provide your own typed attributes
+
 **4.2.0**
 
 - Add support for ``byte``-based paths in ``connect_unix``, ``create_unix_listeners``,

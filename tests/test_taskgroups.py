@@ -22,6 +22,7 @@ from anyio import (
     get_current_task,
     move_on_after,
     sleep,
+    sleep_forever,
     wait_all_tasks_blocked,
 )
 from anyio.abc import TaskGroup, TaskStatus
@@ -123,6 +124,16 @@ async def test_start_called_twice() -> None:
         assert value is None
 
 
+async def test_no_called_started_twice() -> None:
+    async def taskfunc(*, task_status: TaskStatus) -> None:
+        task_status.started()
+
+    async with create_task_group() as tg:
+        coro = tg.start(taskfunc)
+        tg.cancel_scope.cancel()
+        await coro
+
+
 async def test_start_with_value() -> None:
     async def taskfunc(*, task_status: TaskStatus) -> None:
         task_status.started("foo")
@@ -198,9 +209,6 @@ async def test_start_native_host_cancelled() -> None:
     async def start_another() -> None:
         async with create_task_group() as tg:
             await tg.start(taskfunc)
-
-    if sys.version_info < (3, 9):
-        pytest.xfail("Requires a way to detect cancellation source")
 
     task = asyncio.get_running_loop().create_task(start_another())
     await wait_all_tasks_blocked()
@@ -447,6 +455,19 @@ async def test_cancel_before_entering_scope() -> None:
         pytest.fail("execution should not reach this point")
 
 
+@pytest.mark.xfail(
+    sys.version_info < (3, 11), reason="Requires asyncio.Task.cancelling()"
+)
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_cancel_counter_nested_scopes() -> None:
+    with CancelScope() as root_scope:
+        with CancelScope():
+            root_scope.cancel()
+            await sleep(0.5)
+
+    assert not cast(asyncio.Task, asyncio.current_task()).cancelling()
+
+
 async def test_exception_group_children() -> None:
     with pytest.raises(BaseExceptionGroup) as exc:
         async with create_task_group() as tg:
@@ -530,10 +551,10 @@ async def test_fail_after_cancelled_before_deadline() -> None:
     reason="There is currently no way to tell if cancellation happened due to timeout "
     "explicitly if the deadline has been exceeded"
 )
-async def test_fail_after_scope_camcelled_before_timeout() -> None:
+async def test_fail_after_scope_cancelled_before_timeout() -> None:
     with fail_after(0.1) as scope:
         scope.cancel()
-        time.sleep(0.11)
+        time.sleep(0.11)  # noqa: ASYNC101
         await sleep(0)
 
 
@@ -1334,6 +1355,24 @@ async def test_cancel_child_task_when_host_is_shielded() -> None:
             with CancelScope(shield=True), fail_after(1):
                 parent_scope.cancel()
                 await cancelled.wait()
+
+
+async def test_start_cancels_parent_scope() -> None:
+    """Regression test for #685 / #710."""
+    started: bool = False
+
+    async def in_task_group(task_status: TaskStatus[None]) -> None:
+        nonlocal started
+        started = True
+        await sleep_forever()
+
+    async with create_task_group() as tg:
+        with CancelScope() as inner_scope:
+            inner_scope.cancel()
+            await tg.start(in_task_group)
+
+    assert started
+    assert not tg.cancel_scope.cancel_called
 
 
 class TestTaskStatusTyping:

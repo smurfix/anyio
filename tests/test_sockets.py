@@ -7,6 +7,7 @@ import os
 import platform
 import socket
 import sys
+import tempfile
 import threading
 import time
 from contextlib import suppress
@@ -14,7 +15,7 @@ from pathlib import Path
 from socket import AddressFamily
 from ssl import SSLContext, SSLError
 from threading import Thread
-from typing import Any, Iterable, Iterator, NoReturn, TypeVar, cast
+from typing import Any, Generator, Iterable, Iterator, NoReturn, TypeVar, cast
 
 import psutil
 import pytest
@@ -27,6 +28,7 @@ from anyio import (
     BrokenResourceError,
     BusyResourceError,
     ClosedResourceError,
+    EndOfStream,
     Event,
     TypedAttributeLookupError,
     connect_tcp,
@@ -511,6 +513,7 @@ class TestTCPStream:
         assert not caplog.text
 
 
+@pytest.mark.network
 class TestTCPListener:
     async def test_extra_attributes(self, family: AnyIPAddressFamily) -> None:
         async with await create_tcp_listener(
@@ -679,6 +682,29 @@ class TestTCPListener:
 
             tg.cancel_scope.cancel()
 
+    async def test_eof_after_send(self, family: AnyIPAddressFamily) -> None:
+        """Regression test for #701."""
+        received_bytes = b""
+
+        async def handle(stream: SocketStream) -> None:
+            nonlocal received_bytes
+            async with stream:
+                received_bytes = await stream.receive()
+                with pytest.raises(EndOfStream), fail_after(1):
+                    await stream.receive()
+
+            tg.cancel_scope.cancel()
+
+        multi = await create_tcp_listener(family=family, local_host="localhost")
+        async with multi, create_task_group() as tg:
+            with socket.socket(family) as client:
+                client.connect(multi.extra(SocketAttribute.local_address))
+                client.send(b"Hello")
+                client.shutdown(socket.SHUT_WR)
+                await multi.serve(handle)
+
+        assert received_bytes == b"Hello"
+
     @skip_ipv6_mark
     @pytest.mark.skipif(
         sys.platform == "win32",
@@ -707,8 +733,11 @@ class TestTCPListener:
 )
 class TestUNIXStream:
     @pytest.fixture
-    def socket_path(self, tmp_path_factory: TempPathFactory) -> Path:
-        return tmp_path_factory.mktemp("unix").joinpath("socket")
+    def socket_path(self) -> Generator[Path, None, None]:
+        # Use stdlib tempdir generation
+        # Fixes `OSError: AF_UNIX path too long` from pytest generated temp_path
+        with tempfile.TemporaryDirectory() as path:
+            yield Path(path) / "socket"
 
     @pytest.fixture(params=[False, True], ids=["str", "path"])
     def socket_path_or_str(self, request: SubRequest, socket_path: Path) -> Path | str:
@@ -1012,7 +1041,7 @@ class TestUNIXStream:
         platform.system() == "Darwin", reason="macOS requires valid UTF-8 paths"
     )
     async def test_connecting_with_non_utf8(self, socket_path: Path) -> None:
-        actual_path = str(socket_path).encode() + b"\xF0"
+        actual_path = str(socket_path).encode() + b"\xf0"
         server = socket.socket(socket.AF_UNIX)
         server.bind(actual_path)
         server.listen(1)
@@ -1026,8 +1055,11 @@ class TestUNIXStream:
 )
 class TestUNIXListener:
     @pytest.fixture
-    def socket_path(self, tmp_path_factory: TempPathFactory) -> Path:
-        return tmp_path_factory.mktemp("unix").joinpath("socket")
+    def socket_path(self) -> Generator[Path, None, None]:
+        # Use stdlib tempdir generation
+        # Fixes `OSError: AF_UNIX path too long` from pytest generated temp_path
+        with tempfile.TemporaryDirectory() as path:
+            yield Path(path) / "socket"
 
     @pytest.fixture(params=[False, True], ids=["str", "path"])
     def socket_path_or_str(self, request: SubRequest, socket_path: Path) -> Path | str:
@@ -1127,7 +1159,7 @@ class TestUNIXListener:
         platform.system() == "Darwin", reason="macOS requires valid UTF-8 paths"
     )
     async def test_listening_invalid_ascii(self, socket_path: Path) -> None:
-        real_path = str(socket_path).encode() + b"\xF0"
+        real_path = str(socket_path).encode() + b"\xf0"
         async with await create_unix_listener(real_path):
             pass
 
@@ -1140,37 +1172,40 @@ async def test_multi_listener(tmp_path_factory: TempPathFactory) -> None:
 
     client_addresses: list[str | IPSockAddrType] = []
     listeners: list[Listener] = [await create_tcp_listener(local_host="localhost")]
-    if sys.platform != "win32":
-        socket_path = tmp_path_factory.mktemp("unix").joinpath("socket")
-        listeners.append(await create_unix_listener(socket_path))
+    with tempfile.TemporaryDirectory() as path:
+        if sys.platform != "win32":
+            listeners.append(await create_unix_listener(Path(path) / "socket"))
 
-    expected_addresses: list[str | IPSockAddrType] = []
-    async with MultiListener(listeners) as multi_listener:
-        async with create_task_group() as tg:
-            tg.start_soon(multi_listener.serve, handle)
-            for listener in multi_listener.listeners:
-                event = Event()
-                local_address = listener.extra(SocketAttribute.local_address)
-                if (
-                    sys.platform != "win32"
-                    and listener.extra(SocketAttribute.family)
-                    == socket.AddressFamily.AF_UNIX
-                ):
-                    assert isinstance(local_address, str)
-                    stream: SocketStream = await connect_unix(local_address)
-                else:
-                    assert isinstance(local_address, tuple)
-                    stream = await connect_tcp(*local_address)
+        expected_addresses: list[str | IPSockAddrType] = []
+        async with MultiListener(listeners) as multi_listener:
+            async with create_task_group() as tg:
+                tg.start_soon(multi_listener.serve, handle)
+                for listener in multi_listener.listeners:
+                    event = Event()
+                    local_address = listener.extra(SocketAttribute.local_address)
+                    if (
+                        sys.platform != "win32"
+                        and listener.extra(SocketAttribute.family)
+                        == socket.AddressFamily.AF_UNIX
+                    ):
+                        assert isinstance(local_address, str)
+                        stream: SocketStream = await connect_unix(local_address)
+                    else:
+                        assert isinstance(local_address, tuple)
+                        stream = await connect_tcp(*local_address)
 
-                expected_addresses.append(stream.extra(SocketAttribute.local_address))
-                await event.wait()
-                await stream.aclose()
+                    expected_addresses.append(
+                        stream.extra(SocketAttribute.local_address)
+                    )
+                    await event.wait()
+                    await stream.aclose()
 
-            tg.cancel_scope.cancel()
+                tg.cancel_scope.cancel()
 
-    assert client_addresses == expected_addresses
+        assert client_addresses == expected_addresses
 
 
+@pytest.mark.network
 @pytest.mark.usefixtures("check_asyncio_bug")
 class TestUDPSocket:
     async def test_extra_attributes(self, family: AnyIPAddressFamily) -> None:
@@ -1296,6 +1331,7 @@ class TestUDPSocket:
             assert local_address[1] > 0
 
 
+@pytest.mark.network
 @pytest.mark.usefixtures("check_asyncio_bug")
 class TestConnectedUDPSocket:
     async def test_extra_attributes(self, family: AnyIPAddressFamily) -> None:
@@ -1423,16 +1459,22 @@ class TestConnectedUDPSocket:
 )
 class TestUNIXDatagramSocket:
     @pytest.fixture
-    def socket_path(self, tmp_path_factory: TempPathFactory) -> Path:
-        return tmp_path_factory.mktemp("unix").joinpath("socket")
+    def socket_path(self) -> Generator[Path, None, None]:
+        # Use stdlib tempdir generation
+        # Fixes `OSError: AF_UNIX path too long` from pytest generated temp_path
+        with tempfile.TemporaryDirectory() as path:
+            yield Path(path) / "socket"
 
     @pytest.fixture(params=[False, True], ids=["str", "path"])
     def socket_path_or_str(self, request: SubRequest, socket_path: Path) -> Path | str:
         return socket_path if request.param else str(socket_path)
 
     @pytest.fixture
-    def peer_socket_path(self, tmp_path_factory: TempPathFactory) -> Path:
-        return tmp_path_factory.mktemp("unix").joinpath("peer_socket")
+    def peer_socket_path(self) -> Generator[Path, None, None]:
+        # Use stdlib tempdir generation
+        # Fixes `OSError: AF_UNIX path too long` from pytest generated temp_path
+        with tempfile.TemporaryDirectory() as path:
+            yield Path(path) / "peer_socket"
 
     async def test_extra_attributes(self, socket_path: Path) -> None:
         async with await create_unix_datagram_socket(local_path=socket_path) as unix_dg:
@@ -1535,7 +1577,7 @@ class TestUNIXDatagramSocket:
         platform.system() == "Darwin", reason="macOS requires valid UTF-8 paths"
     )
     async def test_local_path_invalid_ascii(self, socket_path: Path) -> None:
-        real_path = str(socket_path).encode() + b"\xF0"
+        real_path = str(socket_path).encode() + b"\xf0"
         async with await create_unix_datagram_socket(local_path=real_path):
             pass
 
@@ -1545,16 +1587,22 @@ class TestUNIXDatagramSocket:
 )
 class TestConnectedUNIXDatagramSocket:
     @pytest.fixture
-    def socket_path(self, tmp_path_factory: TempPathFactory) -> Path:
-        return tmp_path_factory.mktemp("unix").joinpath("socket")
+    def socket_path(self) -> Generator[Path, None, None]:
+        # Use stdlib tempdir generation
+        # Fixes `OSError: AF_UNIX path too long` from pytest generated temp_path
+        with tempfile.TemporaryDirectory() as path:
+            yield Path(path) / "socket"
 
     @pytest.fixture(params=[False, True], ids=["str", "path"])
     def socket_path_or_str(self, request: SubRequest, socket_path: Path) -> Path | str:
         return socket_path if request.param else str(socket_path)
 
     @pytest.fixture
-    def peer_socket_path(self, tmp_path_factory: TempPathFactory) -> Path:
-        return tmp_path_factory.mktemp("unix").joinpath("peer_socket")
+    def peer_socket_path(self) -> Generator[Path, None, None]:
+        # Use stdlib tempdir generation
+        # Fixes `OSError: AF_UNIX path too long` from pytest generated temp_path
+        with tempfile.TemporaryDirectory() as path:
+            yield Path(path) / "peer_socket"
 
     @pytest.fixture(params=[False, True], ids=["peer_str", "peer_path"])
     def peer_socket_path_or_str(
