@@ -3,6 +3,63 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
+**4.6.0**
+
+- Dropped support for Python 3.8
+  (as `#698 <https://github.com/agronholm/anyio/issues/698>`_ cannot be resolved
+  without cancel message support)
+- Fixed 100% CPU use on asyncio while waiting for an exiting task group to finish while
+  said task group is within a cancelled cancel scope
+  (`#695 <https://github.com/agronholm/anyio/issues/695>`_)
+- Fixed cancel scopes on asyncio not propagating ``CancelledError`` on exit when the
+  enclosing cancel scope has been effectively cancelled
+  (`#698 <https://github.com/agronholm/anyio/issues/698>`_)
+- Fixed asyncio task groups not yielding control to the event loop at exit if there were
+  no child tasks to wait on
+- Fixed inconsistent task uncancellation with asyncio cancel scopes belonging to a
+  task group when said task group has child tasks running
+
+**4.5.0**
+
+- Improved the performance of ``anyio.Lock`` and ``anyio.Semaphore`` on asyncio (even up
+  to 50 %)
+- Added the ``fast_acquire`` parameter to ``anyio.Lock`` and ``anyio.Semaphore`` to
+  further boost performance at the expense of safety (``acquire()`` will not yield
+  control back if there is no contention)
+- Added support for the ``from_uri()``, ``full_match()``, ``parser`` methods/properties
+  in ``anyio.Path``, newly added in Python 3.13
+  (`#737 <https://github.com/agronholm/anyio/issues/737>`_)
+- Added support for more keyword arguments for ``run_process()`` and ``open_process()``:
+  ``startupinfo``, ``creationflags``, ``pass_fds``, ``user``, ``group``,
+  ``extra_groups`` and ``umask``
+  (`#742 <https://github.com/agronholm/anyio/issues/742>`_)
+- Improved the type annotations and support for ``PathLike`` in ``run_process()`` and
+  ``open_process()`` to allow for path-like arguments, just like ``subprocess.Popen``
+- Changed the ``ResourceWarning`` from an unclosed memory object stream to include its
+  address for easier identification
+- Changed ``start_blocking_portal()`` to always use daemonic threads, to accommodate the
+  "loitering event loop" use case
+- Bumped the minimum version of Trio to v0.26.1
+- Fixed ``__repr__()`` of ``MemoryObjectItemReceiver``, when ``item`` is not defined
+  (`#767 <https://github.com/agronholm/anyio/pulls/767>`_; PR by @Danipulok)
+- Fixed ``to_process.run_sync()`` failing to initialize if ``__main__.__file__`` pointed
+  to a file in a nonexistent directory
+  (`#696 <https://github.com/agronholm/anyio/issues/696>`_)
+- Fixed ``AssertionError: feed_data after feed_eof`` on asyncio when a subprocess is
+  closed early, before its output has been read
+  (`#490 <https://github.com/agronholm/anyio/issues/490>`_)
+- Fixed ``TaskInfo.has_pending_cancellation()`` on asyncio not respecting shielded
+  scopes (`#771 <https://github.com/agronholm/anyio/issues/771>`_; PR by @gschaffner)
+- Fixed ``SocketStream.receive()`` returning ``bytearray`` instead of ``bytes`` when
+  using asyncio with ``ProactorEventLoop`` (Windows)
+  (`#776 <https://github.com/agronholm/anyio/issues/776>`_)
+- Fixed quitting the debugger in a pytest test session while in an active task group
+  failing the test instead of exiting the test session (because the exit exception
+  arrives in an exception group)
+- Fixed support for Linux abstract namespaces in UNIX sockets that was broken in v4.2
+  (#781 <https://github.com/agronholm/anyio/issues/781>_; PR by @tapetersen)
+- Fixed ``KeyboardInterrupt`` (ctrl+c) hanging the asyncio pytest runner
+
 **4.4.0**
 
 - Added the ``BlockingPortalProvider`` class to aid with constructing synchronous

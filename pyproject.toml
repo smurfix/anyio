@@ -19,13 +19,13 @@ classifiers = [
     "Typing :: Typed",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
-requires-python = ">= 3.8"
+requires-python = ">= 3.9"
 dependencies = [
     "exceptiongroup >= 1.0.2; python_version < '3.11'",
     "idna >= 2.8",
@@ -41,7 +41,7 @@ Changelog = "https://anyio.readthedocs.io/en/stable/versionhistory.html"
 "Issue tracker" = "https://github.com/agronholm/anyio/issues"
 
 [project.optional-dependencies]
-trio = ["trio >= 0.23"]
+trio = ["trio >= 0.26.1"]
 test = [
     "anyio[trio]",
     "coverage[toml] >= 7",
@@ -51,11 +51,14 @@ test = [
     "pytest >= 7.0",
     "pytest-mock >= 3.6.1",
     "trustme",
-    "uvloop >= 0.17; platform_python_implementation == 'CPython' and platform_system != 'Windows'",
+    """\
+    uvloop >= 0.21.0b1; platform_python_implementation == 'CPython' \
+    and platform_system != 'Windows'\
+    """
 ]
 doc = [
     "packaging",
-    "Sphinx >= 7",
+    "Sphinx ~= 7.4",
     "sphinx_rtd_theme",
     "sphinx-autodoc-typehints >= 1.2.0",
 ]
@@ -87,7 +90,7 @@ extend-select = [
 "required-imports" = ["from __future__ import annotations"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.13"
 strict = true
 ignore_missing_imports = true
 disallow_any_generics = false
@@ -97,13 +100,12 @@ disallow_subclassing_any = false
 show_error_codes = true
 
 [tool.pytest.ini_options]
-addopts = "-rsx --tb=short --strict-config --strict-markers -p anyio -p no:asyncio -p no:trio"
+addopts = "-rsfE --tb=short --strict-config --strict-markers -p anyio -p no:asyncio -p no:trio"
 testpaths = ["tests"]
 xfail_strict = true
 # Ignore resource warnings due to a CPython/Windows bug (https://bugs.python.org/issue44428)
 filterwarnings = [
     "error",
-    "ignore:unclosed <socket.socket.*:ResourceWarning",
     "ignore:unclosed transport <_ProactorSocketTransport.*:ResourceWarning",
     "ignore:ast.Str is deprecated:DeprecationWarning",
     "ignore:Attribute s is deprecated:DeprecationWarning",
@@ -125,7 +127,7 @@ show_missing = true
 [tool.tox]
 legacy_tox_ini = """
 [tox]
-envlist = pre-commit, py38, py39, py310, py311, py312, pypy3
+envlist = pre-commit, py39, py310, py311, py312, py313, pypy3
 skip_missing_interpreters = true
 minversion = 4.0.0
 

@@ -18,7 +18,11 @@ from anyio import (
     wait_all_tasks_blocked,
 )
 from anyio.abc import ObjectReceiveStream, ObjectSendStream, TaskStatus
-from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
+from anyio.streams.memory import (
+    MemoryObjectItemReceiver,
+    MemoryObjectReceiveStream,
+    MemoryObjectSendStream,
+)
 
 if sys.version_info < (3, 11):
     from exceptiongroup import ExceptionGroup
@@ -469,11 +473,15 @@ async def test_deprecated_item_type_parameter() -> None:
 async def test_not_closed_warning() -> None:
     send, receive = create_memory_object_stream[int]()
 
-    with pytest.warns(ResourceWarning, match="Unclosed <MemoryObjectSendStream>"):
+    with pytest.warns(
+        ResourceWarning, match="Unclosed <MemoryObjectSendStream at [0-9a-f]+>"
+    ):
         del send
         gc.collect()
 
-    with pytest.warns(ResourceWarning, match="Unclosed <MemoryObjectReceiveStream>"):
+    with pytest.warns(
+        ResourceWarning, match="Unclosed <MemoryObjectReceiveStream at [0-9a-f]+>"
+    ):
         del receive
         gc.collect()
 
@@ -498,3 +506,20 @@ async def test_send_to_natively_cancelled_receiver() -> None:
             await receive_task
 
         assert receive.receive_nowait() == "hello"
+
+
+async def test_memory_object_item_receiver_repr() -> None:
+    """
+    Test the repr of `MemoryObjectItemReceiver`.
+    Since when `item` is not set, the default dataclass repr raises an AttributeError.
+    """
+    receiver = MemoryObjectItemReceiver[str]()
+
+    assert str(receiver) is not None
+    receiver_repr = repr(receiver)
+    assert "item=None" in receiver_repr
+
+    assert str(receiver) is not None
+    receiver.item = "test_item"
+    receiver_repr = repr(receiver)
+    assert "item='test_item'" in receiver_repr
