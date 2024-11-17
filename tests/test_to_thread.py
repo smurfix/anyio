@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextvars import ContextVar
 from functools import partial
 from typing import Any, NoReturn
@@ -21,6 +21,7 @@ from anyio import (
     to_thread,
     wait_all_tasks_blocked,
 )
+from anyio.from_thread import BlockingPortalProvider
 
 pytestmark = pytest.mark.anyio
 
@@ -85,12 +86,14 @@ async def test_run_in_custom_limiter() -> None:
 
 
 @pytest.mark.parametrize(
-    "cancellable, expected_last_active",
-    [(False, "task"), (True, "thread")],
-    ids=["uncancellable", "cancellable"],
+    "abandon_on_cancel, expected_last_active",
+    [
+        pytest.param(False, "task", id="noabandon"),
+        pytest.param(True, "thread", id="abandon"),
+    ],
 )
 async def test_cancel_worker_thread(
-    cancellable: bool, expected_last_active: str
+    abandon_on_cancel: bool, expected_last_active: str
 ) -> None:
     """
     Test that when a task running a worker thread is cancelled, the cancellation is not
@@ -109,7 +112,7 @@ async def test_cancel_worker_thread(
     async def task_worker() -> None:
         nonlocal last_active
         try:
-            await to_thread.run_sync(thread_worker, cancellable=cancellable)
+            await to_thread.run_sync(thread_worker, abandon_on_cancel=abandon_on_cancel)
         finally:
             last_active = "task"
 
@@ -132,12 +135,17 @@ async def test_cancel_wait_on_thread() -> None:
         future.set_result(event.wait(1))
 
     async with create_task_group() as tg:
-        tg.start_soon(partial(to_thread.run_sync, cancellable=True), wait_event)
+        tg.start_soon(partial(to_thread.run_sync, abandon_on_cancel=True), wait_event)
         await wait_all_tasks_blocked()
         tg.cancel_scope.cancel()
 
     await to_thread.run_sync(event.set)
     assert future.result(1)
+
+
+async def test_deprecated_cancellable_param() -> None:
+    with pytest.warns(DeprecationWarning, match="The `cancellable=`"):
+        await to_thread.run_sync(bool, cancellable=True)
 
 
 async def test_contextvar_propagation() -> None:
@@ -158,7 +166,7 @@ async def test_asyncio_cancel_native_task() -> None:
     async def run_in_thread() -> None:
         nonlocal task
         task = asyncio.current_task()
-        await to_thread.run_sync(time.sleep, 0.2, cancellable=True)
+        await to_thread.run_sync(time.sleep, 0.2, abandon_on_cancel=True)
 
     async with create_task_group() as tg:
         tg.start_soon(run_in_thread)
@@ -280,3 +288,73 @@ async def test_stopiteration() -> None:
 
     with pytest.raises(RuntimeError, match="coroutine raised StopIteration"):
         await to_thread.run_sync(raise_stopiteration)
+
+
+class TestBlockingPortalProvider:
+    @pytest.fixture
+    def provider(
+        self, anyio_backend_name: str, anyio_backend_options: dict[str, Any]
+    ) -> BlockingPortalProvider:
+        return BlockingPortalProvider(
+            backend=anyio_backend_name, backend_options=anyio_backend_options
+        )
+
+    def test_single_thread(
+        self, provider: BlockingPortalProvider, anyio_backend_name: str
+    ) -> None:
+        threads: set[threading.Thread] = set()
+
+        async def check_thread() -> None:
+            assert sniffio.current_async_library() == anyio_backend_name
+            threads.add(threading.current_thread())
+
+        active_threads_before = threading.active_count()
+        for _ in range(3):
+            with provider as portal:
+                portal.call(check_thread)
+
+        assert len(threads) == 3
+        assert threading.active_count() == active_threads_before
+
+    def test_single_thread_overlapping(
+        self, provider: BlockingPortalProvider, anyio_backend_name: str
+    ) -> None:
+        threads: set[threading.Thread] = set()
+
+        async def check_thread() -> None:
+            assert sniffio.current_async_library() == anyio_backend_name
+            threads.add(threading.current_thread())
+
+        with provider as portal1:
+            with provider as portal2:
+                assert portal1 is portal2
+                portal2.call(check_thread)
+
+            portal1.call(check_thread)
+
+        assert len(threads) == 1
+
+    def test_multiple_threads(
+        self, provider: BlockingPortalProvider, anyio_backend_name: str
+    ) -> None:
+        threads: set[threading.Thread] = set()
+        event = Event()
+
+        async def check_thread() -> None:
+            assert sniffio.current_async_library() == anyio_backend_name
+            await event.wait()
+            threads.add(threading.current_thread())
+
+        def dummy() -> None:
+            with provider as portal:
+                portal.call(check_thread)
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            for _ in range(3):
+                pool.submit(dummy)
+
+            with provider as portal:
+                portal.call(wait_all_tasks_blocked)
+                portal.call(event.set)
+
+        assert len(threads) == 1

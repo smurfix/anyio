@@ -8,7 +8,7 @@ from io import IOBase
 from ipaddress import IPv4Address, IPv6Address
 from socket import AddressFamily
 from types import TracebackType
-from typing import Any, Tuple, TypeVar, Union
+from typing import Any, TypeVar, Union
 
 from .._core._typedattr import (
     TypedAttributeProvider,
@@ -19,10 +19,10 @@ from ._streams import ByteStream, Listener, UnreliableObjectStream
 from ._tasks import TaskGroup
 
 IPAddressType = Union[str, IPv4Address, IPv6Address]
-IPSockAddrType = Tuple[str, int]
+IPSockAddrType = tuple[str, int]
 SockAddrType = Union[IPSockAddrType, str]
-UDPPacketType = Tuple[bytes, IPSockAddrType]
-UNIXDatagramPacketType = Tuple[bytes, str]
+UDPPacketType = tuple[bytes, IPSockAddrType]
+UNIXDatagramPacketType = tuple[bytes, str]
 T_Retval = TypeVar("T_Retval")
 
 
@@ -77,9 +77,9 @@ class _SocketProvider(TypedAttributeProvider):
 
         # Provide local and remote ports for IP based sockets
         if self._raw_socket.family in (AddressFamily.AF_INET, AddressFamily.AF_INET6):
-            attributes[
-                SocketAttribute.local_port
-            ] = lambda: self._raw_socket.getsockname()[1]
+            attributes[SocketAttribute.local_port] = (
+                lambda: self._raw_socket.getsockname()[1]
+            )
             if peername is not None:
                 remote_port = peername[1]
                 attributes[SocketAttribute.remote_port] = lambda: remote_port

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import errno
+import os
 import socket
 import ssl
+import stat
 import sys
 from collections.abc import Awaitable
 from ipaddress import IPv6Address, ip_address
 from os import PathLike, chmod
-from pathlib import Path
 from socket import AddressFamily, SocketKind
-from typing import Literal, Tuple, cast, overload
+from typing import Any, Literal, cast, overload
 
 from .. import to_thread
 from ..abc import (
@@ -51,8 +53,7 @@ async def connect_tcp(
     tls_standard_compatible: bool = ...,
     tls_hostname: str,
     happy_eyeballs_delay: float = ...,
-) -> TLSStream:
-    ...
+) -> TLSStream: ...
 
 
 # ssl_context given
@@ -66,8 +67,7 @@ async def connect_tcp(
     tls_standard_compatible: bool = ...,
     tls_hostname: str | None = ...,
     happy_eyeballs_delay: float = ...,
-) -> TLSStream:
-    ...
+) -> TLSStream: ...
 
 
 # tls=True
@@ -82,8 +82,7 @@ async def connect_tcp(
     tls_standard_compatible: bool = ...,
     tls_hostname: str | None = ...,
     happy_eyeballs_delay: float = ...,
-) -> TLSStream:
-    ...
+) -> TLSStream: ...
 
 
 # tls=False
@@ -98,8 +97,7 @@ async def connect_tcp(
     tls_standard_compatible: bool = ...,
     tls_hostname: str | None = ...,
     happy_eyeballs_delay: float = ...,
-) -> SocketStream:
-    ...
+) -> SocketStream: ...
 
 
 # No TLS arguments
@@ -110,8 +108,7 @@ async def connect_tcp(
     *,
     local_host: IPAddressType | None = ...,
     happy_eyeballs_delay: float = ...,
-) -> SocketStream:
-    ...
+) -> SocketStream: ...
 
 
 async def connect_tcp(
@@ -245,7 +242,7 @@ async def connect_tcp(
     return connected_stream
 
 
-async def connect_unix(path: str | PathLike[str]) -> UNIXSocketStream:
+async def connect_unix(path: str | bytes | PathLike[Any]) -> UNIXSocketStream:
     """
     Connect to the given UNIX socket.
 
@@ -255,7 +252,7 @@ async def connect_unix(path: str | PathLike[str]) -> UNIXSocketStream:
     :return: a socket stream object
 
     """
-    path = str(Path(path))
+    path = os.fspath(path)
     return await get_async_backend().connect_unix(path)
 
 
@@ -340,7 +337,10 @@ async def create_tcp_listener(
 
 
 async def create_unix_listener(
-    path: str | PathLike[str], *, mode: int | None = None, backlog: int = 65536
+    path: str | bytes | PathLike[Any],
+    *,
+    mode: int | None = None,
+    backlog: int = 65536,
 ) -> SocketListener:
     """
     Create a UNIX socket listener.
@@ -466,7 +466,7 @@ async def create_connected_udp_socket(
 
 async def create_unix_datagram_socket(
     *,
-    local_path: None | str | PathLike[str] = None,
+    local_path: None | str | bytes | PathLike[Any] = None,
     local_mode: int | None = None,
 ) -> UNIXDatagramSocket:
     """
@@ -493,9 +493,9 @@ async def create_unix_datagram_socket(
 
 
 async def create_connected_unix_datagram_socket(
-    remote_path: str | PathLike[str],
+    remote_path: str | bytes | PathLike[Any],
     *,
-    local_path: None | str | PathLike[str] = None,
+    local_path: None | str | bytes | PathLike[Any] = None,
     local_mode: int | None = None,
 ) -> ConnectedUNIXDatagramSocket:
     """
@@ -516,7 +516,7 @@ async def create_connected_unix_datagram_socket(
     :return: a connected UNIX datagram socket
 
     """
-    remote_path = str(Path(remote_path))
+    remote_path = os.fspath(remote_path)
     raw_socket = await setup_unix_local_socket(
         local_path, local_mode, socket.SOCK_DGRAM
     )
@@ -634,7 +634,7 @@ def wait_socket_writable(sock: socket.socket) -> Awaitable[None]:
 
 
 def convert_ipv6_sockaddr(
-    sockaddr: tuple[str, int, int, int] | tuple[str, int]
+    sockaddr: tuple[str, int, int, int] | tuple[str, int],
 ) -> tuple[str, int]:
     """
     Convert a 4-tuple IPv6 socket address to a 2-tuple (address, port) format.
@@ -649,7 +649,7 @@ def convert_ipv6_sockaddr(
     """
     # This is more complicated than it should be because of MyPy
     if isinstance(sockaddr, tuple) and len(sockaddr) == 4:
-        host, port, flowinfo, scope_id = cast(Tuple[str, int, int, int], sockaddr)
+        host, port, flowinfo, scope_id = sockaddr
         if scope_id:
             # PyPy (as of v7.3.11) leaves the interface name in the result, so
             # we discard it and only get the scope ID from the end
@@ -661,11 +661,11 @@ def convert_ipv6_sockaddr(
         else:
             return host, port
     else:
-        return cast(Tuple[str, int], sockaddr)
+        return sockaddr
 
 
 async def setup_unix_local_socket(
-    path: None | str | PathLike[str],
+    path: None | str | bytes | PathLike[Any],
     mode: int | None,
     socktype: int,
 ) -> socket.socket:
@@ -680,11 +680,26 @@ async def setup_unix_local_socket(
     :param socktype: socket.SOCK_STREAM or socket.SOCK_DGRAM
 
     """
+    path_str: str | None
     if path is not None:
-        path_str = str(path)
-        path = Path(path)
-        if path.is_socket():
-            path.unlink()
+        path_str = os.fsdecode(path)
+
+        # Linux abstract namespace sockets aren't backed by a concrete file so skip stat call
+        if not path_str.startswith("\0"):
+            # Copied from pathlib...
+            try:
+                stat_result = os.stat(path)
+            except OSError as e:
+                if e.errno not in (
+                    errno.ENOENT,
+                    errno.ENOTDIR,
+                    errno.EBADF,
+                    errno.ELOOP,
+                ):
+                    raise
+            else:
+                if stat.S_ISSOCK(stat_result.st_mode):
+                    os.unlink(path)
     else:
         path_str = None
 
@@ -693,9 +708,9 @@ async def setup_unix_local_socket(
 
     if path_str is not None:
         try:
-            await to_thread.run_sync(raw_socket.bind, path_str, cancellable=True)
+            await to_thread.run_sync(raw_socket.bind, path_str, abandon_on_cancel=True)
             if mode is not None:
-                await to_thread.run_sync(chmod, path_str, mode, cancellable=True)
+                await to_thread.run_sync(chmod, path_str, mode, abandon_on_cancel=True)
         except BaseException:
             raw_socket.close()
             raise

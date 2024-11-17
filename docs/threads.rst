@@ -205,3 +205,47 @@ maximum of 40 threads to be spawned. You can adjust this limit like this::
 
 .. note:: AnyIO's default thread pool limiter does not affect the default thread pool
     executor on :mod:`asyncio`.
+
+Reacting to cancellation in worker threads
+------------------------------------------
+
+While there is no mechanism in Python to cancel code running in a thread, AnyIO provides a
+mechanism that allows user code to voluntarily check if the host task's scope has been cancelled,
+and if it has, raise a cancellation exception. This can be done by simply calling
+:func:`from_thread.check_cancelled`::
+
+    from anyio import to_thread, from_thread
+
+    def sync_function():
+        while True:
+            from_thread.check_cancelled()
+            print("Not cancelled yet")
+            sleep(1)
+
+    async def foo():
+        with move_on_after(3):
+            await to_thread.run_sync(sync_function)
+
+
+Sharing a blocking portal on demand
+-----------------------------------
+
+If you're building a synchronous API that needs to start a blocking portal on demand,
+you might need a more efficient solution than just starting a blocking portal for each
+call. To that end, you can use :class:`BlockingPortalProvider`::
+
+    from anyio.to_thread import BlockingPortalProvider
+
+    class MyAPI:
+        def __init__(self, async_obj) -> None:
+            self._async_obj = async_obj
+            self._portal_provider = BlockingPortalProvider()
+
+        def do_stuff(self) -> None:
+            with self._portal_provider as portal:
+                portal.call(async_obj.do_async_stuff)
+
+Now, no matter how many threads call the ``do_stuff()`` method on a ``MyAPI`` instance
+at the same time, the same blocking portal will be used to handle the async calls
+inside. It's easy to see that this is much more efficient than having each call spawn
+its own blocking portal.

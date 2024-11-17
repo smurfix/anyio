@@ -66,6 +66,13 @@ Example::
 
     run(main)
 
+.. tip:: If the performance of semaphores is critical for you, you could pass
+   ``fast_acquire=True`` to :class:`Semaphore`. This has the effect of skipping the
+   :func:`~.lowlevel.cancel_shielded_checkpoint` call in :meth:`Semaphore.acquire` if
+   there is no contention (acquisition succeeds immediately). This could, in some cases,
+   lead to the task never yielding control back to to the event loop if you use the
+   semaphore in a loop that does not have other yield points.
+
 Locks
 -----
 
@@ -92,6 +99,12 @@ Example::
 
     run(main)
 
+.. tip:: If the performance of locks is critical for you, you could pass
+   ``fast_acquire=True`` to :class:`Lock`. This has the effect of skipping the
+   :func:`~.lowlevel.cancel_shielded_checkpoint` call in :meth:`Lock.acquire` if there
+   is no contention (acquisition succeeds immediately). This could, in some cases, lead
+   to the task never yielding control back to to the event loop if use the lock in a
+   loop that does not have other yield points.
 
 Conditions
 ----------
@@ -163,3 +176,28 @@ Example::
 
 You can adjust the total number of tokens by setting a different value on the limiter's
 ``total_tokens`` property.
+
+Resource guards
+---------------
+
+Some resources, such as sockets, are very sensitive about concurrent use and should not
+allow even attempts to be used concurrently. For such cases, :class:`ResourceGuard` is
+the appropriate solution::
+
+    class Resource:
+        def __init__(self):
+            self._guard = ResourceGuard()
+
+        async def do_something() -> None:
+            with self._guard:
+                ...
+
+Now, if another task tries calling the ``do_something()`` method on the same
+``Resource`` instance before the first call has finished, that will raise a
+:exc:`BusyResourceError`.
+
+Queues
+------
+
+In place of queues, AnyIO offers a more powerful construct:
+:ref:`memory object streams <memory object streams>`.

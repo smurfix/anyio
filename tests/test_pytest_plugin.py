@@ -308,6 +308,44 @@ def test_module_scoped_task_group_fixture(testdir: Pytester) -> None:
     result.assert_outcomes(passed=len(get_all_backends()))
 
 
+def test_async_fixture_teardown_after_sync_test(testdir: Pytester) -> None:
+    # Regression test for #619
+    testdir.makepyfile(
+        """
+        import pytest
+
+        from anyio import create_task_group, sleep
+
+        @pytest.fixture(scope="session")
+        def anyio_backend():
+            return "asyncio"
+
+
+        @pytest.fixture(scope="module")
+        async def bbbbbb():
+            yield ""
+
+
+        @pytest.fixture(scope="module")
+        async def aaaaaa():
+            yield ""
+
+
+        @pytest.mark.anyio
+        async def test_1(bbbbbb):
+            pass
+
+
+        @pytest.mark.anyio
+        async def test_2(aaaaaa, bbbbbb):
+            pass
+        """
+    )
+
+    result = testdir.runpytest_subprocess(*pytest_args)
+    result.assert_outcomes(passed=2)
+
+
 def test_hypothesis_module_mark(testdir: Pytester) -> None:
     testdir.makepyfile(
         """
@@ -380,3 +418,146 @@ def test_hypothesis_function_mark(testdir: Pytester) -> None:
     result.assert_outcomes(
         passed=2 * len(get_all_backends()), xfailed=2 * len(get_all_backends())
     )
+
+
+@pytest.mark.parametrize("anyio_backend", get_all_backends(), indirect=True)
+def test_debugger_exit_in_taskgroup(testdir: Pytester, anyio_backend_name: str) -> None:
+    testdir.makepyfile(
+        f"""
+        import pytest
+        from _pytest.outcomes import Exit
+        from anyio import create_task_group
+
+        @pytest.fixture
+        def anyio_backend():
+            return {anyio_backend_name!r}
+
+        @pytest.mark.anyio
+        async def test_debugger_exit():
+            async with create_task_group() as tg:
+                raise Exit('Quitting debugger')
+        """
+    )
+
+    result = testdir.runpytest(*pytest_args)
+    result.assert_outcomes()
+
+
+@pytest.mark.parametrize("anyio_backend", get_all_backends(), indirect=True)
+def test_keyboardinterrupt_during_test(
+    testdir: Pytester, anyio_backend_name: str
+) -> None:
+    testdir.makepyfile(
+        f"""
+        import pytest
+        from anyio import create_task_group, sleep
+
+        @pytest.fixture
+        def anyio_backend():
+            return {anyio_backend_name!r}
+
+        async def send_keyboardinterrupt():
+            raise KeyboardInterrupt
+
+        @pytest.mark.anyio
+        async def test_anyio_mark_first():
+            async with create_task_group() as tg:
+                tg.start_soon(send_keyboardinterrupt)
+                await sleep(10)
+        """
+    )
+
+    testdir.runpytest_subprocess(*pytest_args, timeout=3)
+
+
+def test_async_fixture_in_test_class(testdir: Pytester) -> None:
+    # Regression test for #633
+    testdir.makepyfile(
+        """
+        import pytest
+
+
+        class TestAsyncFixtureMethod:
+            is_same_instance = False
+
+            @pytest.fixture(autouse=True)
+            async def async_fixture_method(self):
+                self.is_same_instance = True
+
+            @pytest.mark.anyio
+            async def test_async_fixture_method(self):
+                assert self.is_same_instance
+        """
+    )
+
+    result = testdir.runpytest_subprocess(*pytest_args)
+    result.assert_outcomes(passed=len(get_all_backends()))
+
+
+def test_asyncgen_fixture_in_test_class(testdir: Pytester) -> None:
+    # Regression test for #633
+    testdir.makepyfile(
+        """
+        import pytest
+
+
+        class TestAsyncFixtureMethod:
+            is_same_instance = False
+
+            @pytest.fixture(autouse=True)
+            async def async_fixture_method(self):
+                self.is_same_instance = True
+                yield
+
+            @pytest.mark.anyio
+            async def test_async_fixture_method(self):
+                assert self.is_same_instance
+        """
+    )
+
+    result = testdir.runpytest_subprocess(*pytest_args)
+    result.assert_outcomes(passed=len(get_all_backends()))
+
+
+def test_anyio_fixture_adoption_does_not_persist(testdir: Pytester) -> None:
+    testdir.makepyfile(
+        """
+        import inspect
+        import pytest
+
+        @pytest.fixture
+        async def fixt():
+            return 1
+
+        @pytest.mark.anyio
+        async def test_fixt(fixt):
+            assert fixt == 1
+
+        def test_no_mark(fixt):
+            assert inspect.iscoroutine(fixt)
+            fixt.close()
+        """
+    )
+
+    result = testdir.runpytest(*pytest_args)
+    result.assert_outcomes(passed=len(get_all_backends()) + 1)
+
+
+def test_async_fixture_params(testdir: Pytester) -> None:
+    testdir.makepyfile(
+        """
+        import inspect
+        import pytest
+
+        @pytest.fixture(params=[1, 2])
+        async def fixt(request):
+            return request.param
+
+        @pytest.mark.anyio
+        async def test_params(fixt):
+            assert fixt in (1, 2)
+        """
+    )
+
+    result = testdir.runpytest(*pytest_args)
+    result.assert_outcomes(passed=len(get_all_backends()) * 2)

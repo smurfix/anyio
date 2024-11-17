@@ -68,10 +68,15 @@ class TestPath:
     def populated_tmpdir(self, tmp_path: pathlib.Path) -> pathlib.Path:
         tmp_path.joinpath("testfile").touch()
         tmp_path.joinpath("testfile2").touch()
+
         subdir = tmp_path / "subdir"
-        subdir.mkdir()
-        subdir.joinpath("dummyfile1.txt").touch()
-        subdir.joinpath("dummyfile2.txt").touch()
+        sibdir = tmp_path / "sibdir"
+
+        for subpath in (subdir, sibdir):
+            subpath.mkdir()
+            subpath.joinpath("dummyfile1.txt").touch()
+            subpath.joinpath("dummyfile2.txt").touch()
+
         return tmp_path
 
     async def test_properties(self) -> None:
@@ -88,6 +93,7 @@ class TestPath:
         stdlib_properties.discard("__class_getitem__")
         stdlib_properties.discard("__enter__")
         stdlib_properties.discard("__exit__")
+        stdlib_properties.discard("__firstlineno__")
 
         async_path = Path(path)
         anyio_properties = {
@@ -181,6 +187,20 @@ class TestPath:
         else:
             assert Path("/foo/bar").as_uri() == "file:///foo/bar"
 
+    @pytest.mark.skipif(
+        sys.version_info < (3, 13),
+        reason="Path.from_uri() is only available on Python 3.13+",
+    )
+    def test_from_uri(self) -> None:
+        if platform.system() == "Windows":
+            uri = "file:///C:/foo/bar"
+        else:
+            uri = "file:///foo/bar"
+
+        path = Path.from_uri(uri)
+        assert isinstance(path, Path)
+        assert path.as_uri() == uri
+
     async def test_cwd(self) -> None:
         result = await Path.cwd()
         assert isinstance(result, Path)
@@ -218,7 +238,7 @@ class TestPath:
         assert not await Path("/btelkbee").is_block_device()
         with os.scandir("/dev") as iterator:
             for entry in iterator:
-                if stat.S_ISBLK(entry.stat().st_mode):
+                if stat.S_ISBLK(entry.stat(follow_symlinks=False).st_mode):
                     assert await Path(entry.path).is_block_device()
                     break
             else:
@@ -264,6 +284,7 @@ class TestPath:
         assert not await Path("/gfobj4ewiotj").is_mount()
         assert await Path("/").is_mount()
 
+    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
     def test_is_reserved(self) -> None:
         expected_result = platform.system() == "Windows"
         assert Path("nul").is_reserved() == expected_result
@@ -297,19 +318,29 @@ class TestPath:
         all_paths = []
         async for path in Path(populated_tmpdir).glob("**/*.txt"):
             assert isinstance(path, Path)
-            all_paths.append(path.name)
+            all_paths.append(path.relative_to(populated_tmpdir))
 
         all_paths.sort()
-        assert all_paths == ["dummyfile1.txt", "dummyfile2.txt"]
+        assert all_paths == [
+            Path("sibdir") / "dummyfile1.txt",
+            Path("sibdir") / "dummyfile2.txt",
+            Path("subdir") / "dummyfile1.txt",
+            Path("subdir") / "dummyfile2.txt",
+        ]
 
     async def test_rglob(self, populated_tmpdir: pathlib.Path) -> None:
         all_paths = []
         async for path in Path(populated_tmpdir).rglob("*.txt"):
             assert isinstance(path, Path)
-            all_paths.append(path.name)
+            all_paths.append(path.relative_to(populated_tmpdir))
 
         all_paths.sort()
-        assert all_paths == ["dummyfile1.txt", "dummyfile2.txt"]
+        assert all_paths == [
+            Path("sibdir") / "dummyfile1.txt",
+            Path("sibdir") / "dummyfile2.txt",
+            Path("subdir") / "dummyfile1.txt",
+            Path("subdir") / "dummyfile2.txt",
+        ]
 
     async def test_iterdir(self, populated_tmpdir: pathlib.Path) -> None:
         all_paths = []
@@ -318,11 +349,19 @@ class TestPath:
             all_paths.append(path.name)
 
         all_paths.sort()
-        assert all_paths == ["subdir", "testfile", "testfile2"]
+        assert all_paths == ["sibdir", "subdir", "testfile", "testfile2"]
 
     def test_joinpath(self) -> None:
         path = Path("/foo").joinpath("bar")
         assert path == Path("/foo/bar")
+
+    @pytest.mark.skipif(
+        sys.version_info < (3, 13),
+        reason="Path.full_match() is only available on Python 3.13+",
+    )
+    def test_fullmatch(self) -> None:
+        assert Path("/foo/bar").full_match("/foo/*")
+        assert not Path("/foo/bar").full_match("/baz/*")
 
     def test_match(self) -> None:
         assert Path("/foo/bar").match("/foo/*")
@@ -348,6 +387,9 @@ class TestPath:
         assert path.stat().st_nlink == 2
         assert target.stat().st_nlink == 2
 
+    @pytest.mark.skipif(
+        platform.system() == "Windows", reason="lchmod() does not work on Windows"
+    )
     @pytest.mark.skipif(
         not hasattr(os, "lchmod"), reason="os.lchmod() is not available"
     )
@@ -421,9 +463,28 @@ class TestPath:
         path.write_text("some text åäö", encoding="utf-8")
         assert await Path(path).read_text(encoding="utf-8") == "some text åäö"
 
-    async def test_relative_to(self, tmp_path: pathlib.Path) -> None:
+    async def test_relative_to_subpath(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "subdir"
         assert path.relative_to(tmp_path) == Path("subdir")
+
+    @pytest.mark.skipif(
+        sys.version_info < (3, 12),
+        reason="Path.relative_to(walk_up=<bool>) is only available on Python 3.12+",
+    )
+    async def test_relative_to_sibling(
+        self,
+        populated_tmpdir: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        subdir = Path(populated_tmpdir / "subdir")
+        sibdir = Path(populated_tmpdir / "sibdir")
+
+        with pytest.raises(ValueError):
+            subdir.relative_to(sibdir, walk_up=False)
+
+        monkeypatch.chdir(sibdir)
+        relpath = subdir.relative_to(sibdir, walk_up=True) / "dummyfile1.txt"
+        assert os.access(relpath, os.R_OK)
 
     async def test_rename(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "somefile"

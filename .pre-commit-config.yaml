@@ -4,8 +4,14 @@
 # * Copy this file as ".pre-commit-config.yaml"
 # * Run "pre-commit install".
 repos:
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.35.1
+    hooks:
+      - id: yamllint
+        args: ['-d {extends: relaxed, rules: {line-length: disable}}', '-s']
+
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.4.0
+    rev: v5.0.0
     hooks:
       - id: check-toml
       - id: check-yaml
@@ -16,28 +22,24 @@ repos:
       - id: trailing-whitespace
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.0.286
+    rev: v0.6.9
     hooks:
       - id: ruff
         args: [--fix, --show-fixes]
-
-  - repo: https://github.com/psf/black
-    rev: 23.7.0
-    hooks:
-      - id: black
+      - id: ruff-format
 
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.5.1
+    rev: v1.11.2
     hooks:
       - id: mypy
         additional_dependencies:
           - pytest
-          - trio-typing >= 0.8.0
+          - trio >= 0.23
           - packaging
 
   - repo: https://github.com/pre-commit/pygrep-hooks
     rev: v1.10.0
     hooks:
-    - id: rst-backticks
-    - id: rst-directive-colons
-    - id: rst-inline-touching-normal
+      - id: rst-backticks
+      - id: rst-directive-colons
+      - id: rst-inline-touching-normal
