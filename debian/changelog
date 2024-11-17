@@ -1,3 +1,9 @@
+anyio (4.6.2.1) smurf; urgency=medium
+
+  * Merge
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Sun, 17 Nov 2024 14:56:39 +0100
+
 anyio (4.6.0.2) smurf; urgency=medium
 
   * Depend on current Trio
