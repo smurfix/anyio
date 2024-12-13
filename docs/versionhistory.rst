@@ -3,7 +3,48 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
+**4.7.0**
+
+- Updated ``TaskGroup`` to work with asyncio's eager task factories
+  (`#764 <https://github.com/agronholm/anyio/issues/764>`_)
+- Added the ``wait_readable()`` and ``wait_writable()`` functions which will accept
+  an object with a ``.fileno()`` method or an integer handle, and deprecated
+  their now obsolete versions (``wait_socket_readable()`` and
+  ``wait_socket_writable()``) (PR by @davidbrochart)
+- Changed ``EventAdapter`` (an ``Event`` with no bound async backend) to allow ``set()``
+  to work even before an async backend is bound to it
+  (`#819 <https://github.com/agronholm/anyio/issues/819>`_)
+- Added support for ``wait_readable()`` and ``wait_writable()`` on ``ProactorEventLoop``
+  (used on asyncio + Windows by default)
+- Fixed a misleading ``ValueError`` in the context of DNS failures
+  (`#815 <https://github.com/agronholm/anyio/issues/815>`_; PR by @graingert)
+- Fixed the return type annotations of ``readinto()`` and ``readinto1()`` methods in the
+  ``anyio.AsyncFile`` class
+  (`#825 <https://github.com/agronholm/anyio/issues/825>`_)
+- Fixed ``TaskInfo.has_pending_cancellation()`` on asyncio returning false positives in
+  cleanup code on Python >= 3.11
+  (`#832 <https://github.com/agronholm/anyio/issues/832>`_; PR by @gschaffner)
+- Fixed cancelled cancel scopes on asyncio calling ``asyncio.Task.uncancel`` when
+  propagating a ``CancelledError`` on exit to a cancelled parent scope
+  (`#790 <https://github.com/agronholm/anyio/pull/790>`_; PR by @gschaffner)
+
+**4.6.2**
+
+- Fixed regression caused by (`#807 <https://github.com/agronholm/anyio/pull/807>`_)
+  that prevented the use of parametrized async fixtures
+
+**4.6.1**
+
+This release contains all the changes from both v4.5.1 and v4.6.0, plus:
+
+- Fixed TaskGroup and CancelScope producing cyclic references in tracebacks
+  when raising exceptions (`#806 <https://github.com/agronholm/anyio/pull/806>`_)
+  (PR by @graingert)
+
 **4.6.0**
+
+This release is the successor to v4.5.0 with Python 3.8 support dropped, and does not
+contain the changes from v4.5.1.
 
 - Dropped support for Python 3.8
   (as `#698 <https://github.com/agronholm/anyio/issues/698>`_ cannot be resolved
@@ -18,6 +59,24 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
   no child tasks to wait on
 - Fixed inconsistent task uncancellation with asyncio cancel scopes belonging to a
   task group when said task group has child tasks running
+
+**4.5.1**
+
+As Python 3.8 support was dropped in v4.6.0, this interim release was created to bring a
+regression fix to Python 3.8, and adds a few other fixes also present in v4.6.1.
+
+- Fixed acquring a lock twice in the same task on asyncio hanging instead of raising a
+  ``RuntimeError`` (`#798 <https://github.com/agronholm/anyio/issues/798>`_)
+- Fixed an async fixture's ``self`` being different than the test's ``self`` in
+  class-based tests (`#633 <https://github.com/agronholm/anyio/issues/633>`_)
+  (PR by @agronholm and @graingert)
+- Fixed ``TypeError`` with ``TLSStream`` on Windows when a certificate verification
+  error occurs when using a `truststore <https://github.com/sethmlarson/truststore>`_
+  SSL certificate (`#795 <https://github.com/agronholm/anyio/issues/795>`_)
+- Corrected documentation on ``anyio.Path`` regarding the limitations imposed by the
+  current Python version on several of its methods, and made the ``is_junction`` method
+  unavailable on Python versions earlier than 3.12
+  (`#794 <https://github.com/agronholm/anyio/issues/794>`_)
 
 **4.5.0**
 
@@ -41,7 +100,7 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
   "loitering event loop" use case
 - Bumped the minimum version of Trio to v0.26.1
 - Fixed ``__repr__()`` of ``MemoryObjectItemReceiver``, when ``item`` is not defined
-  (`#767 <https://github.com/agronholm/anyio/pulls/767>`_; PR by @Danipulok)
+  (`#767 <https://github.com/agronholm/anyio/pull/767>`_; PR by @Danipulok)
 - Fixed ``to_process.run_sync()`` failing to initialize if ``__main__.__file__`` pointed
   to a file in a nonexistent directory
   (`#696 <https://github.com/agronholm/anyio/issues/696>`_)
@@ -57,7 +116,7 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
   failing the test instead of exiting the test session (because the exit exception
   arrives in an exception group)
 - Fixed support for Linux abstract namespaces in UNIX sockets that was broken in v4.2
-  (#781 <https://github.com/agronholm/anyio/issues/781>_; PR by @tapetersen)
+  (`#781 <https://github.com/agronholm/anyio/issues/781>`_; PR by @tapetersen)
 - Fixed ``KeyboardInterrupt`` (ctrl+c) hanging the asyncio pytest runner
 
 **4.4.0**

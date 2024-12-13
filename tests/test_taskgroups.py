@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import math
 import sys
 import time
@@ -10,6 +11,7 @@ from typing import Any, NoReturn, cast
 
 import pytest
 from exceptiongroup import catch
+from pytest import FixtureRequest
 from pytest_mock import MockerFixture
 
 import anyio
@@ -671,6 +673,38 @@ async def test_cancel_shielded_scope() -> None:
             await checkpoint()
 
 
+async def test_shielded_cleanup_after_cancel() -> None:
+    """Regression test for #832."""
+    with CancelScope() as outer_scope:
+        outer_scope.cancel()
+        try:
+            await checkpoint()
+        finally:
+            assert current_effective_deadline() == -math.inf
+            assert get_current_task().has_pending_cancellation()
+
+            with CancelScope(shield=True):  # noqa: ASYNC100
+                assert current_effective_deadline() == math.inf
+                assert not get_current_task().has_pending_cancellation()
+
+            assert current_effective_deadline() == -math.inf
+            assert get_current_task().has_pending_cancellation()
+
+
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_cleanup_after_native_cancel() -> None:
+    """Regression test for #832."""
+    # See also https://github.com/python/cpython/pull/102815.
+    task = asyncio.current_task()
+    assert task
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        try:
+            await checkpoint()
+        finally:
+            assert not get_current_task().has_pending_cancellation()
+
+
 async def test_cancelled_not_caught() -> None:
     with CancelScope() as scope:  # noqa:  ASYNC100
         scope.cancel()
@@ -782,7 +816,7 @@ async def test_cancel_host_asyncgen() -> None:
     host_agen = host_agen_fn()
     try:
         loop = asyncio.get_running_loop()
-        await loop.create_task(host_agen.__anext__())  # type: ignore[arg-type]
+        await loop.create_task(host_agen.__anext__())
     finally:
         await host_agen.aclose()
 
@@ -1486,6 +1520,26 @@ class TestUncancel:
         assert str(exc_info.value.exceptions[0]) == "dummy error"
         assert not cast(asyncio.Task, asyncio.current_task()).cancelling()
 
+    async def test_uncancel_cancelled_scope_based_checkpoint(self) -> None:
+        """See also test_cancelled_scope_based_checkpoint."""
+        task = asyncio.current_task()
+        assert task
+
+        with CancelScope() as outer_scope:
+            outer_scope.cancel()
+
+            try:
+                # The following three lines are a way to implement a checkpoint
+                # function. See also https://github.com/python-trio/trio/issues/860.
+                with CancelScope() as inner_scope:
+                    inner_scope.cancel()
+                    await sleep_forever()
+            finally:
+                assert isinstance(sys.exc_info()[1], asyncio.CancelledError)
+                assert task.cancelling()
+
+        assert not task.cancelling()
+
 
 async def test_cancel_before_entering_task_group() -> None:
     with CancelScope() as scope:
@@ -1548,6 +1602,125 @@ async def test_start_cancels_parent_scope() -> None:
     assert not tg.cancel_scope.cancel_called
 
 
+if sys.version_info <= (3, 11):
+
+    def no_other_refs() -> list[object]:
+        return [sys._getframe(1)]
+else:
+
+    def no_other_refs() -> list[object]:
+        return []
+
+
+@pytest.mark.skipif(
+    sys.implementation.name == "pypy",
+    reason=(
+        "gc.get_referrers is broken on PyPy see "
+        "https://github.com/pypy/pypy/issues/5075"
+    ),
+)
+class TestRefcycles:
+    async def test_exception_refcycles_direct(self) -> None:
+        """
+        Test that TaskGroup doesn't keep a reference to the raised ExceptionGroup
+
+        Note: This test never failed on anyio, but keeping this test to align
+        with the tests from cpython.
+        """
+        tg = create_task_group()
+        exc = None
+
+        class _Done(Exception):
+            pass
+
+        try:
+            async with tg:
+                raise _Done
+        except ExceptionGroup as e:
+            exc = e
+
+        assert exc is not None
+        assert gc.get_referrers(exc) == no_other_refs()
+
+    async def test_exception_refcycles_errors(self) -> None:
+        """Test that TaskGroup deletes self._exceptions, and __aexit__ args"""
+        tg = create_task_group()
+        exc = None
+
+        class _Done(Exception):
+            pass
+
+        try:
+            async with tg:
+                raise _Done
+        except ExceptionGroup as excs:
+            exc = excs.exceptions[0]
+
+        assert isinstance(exc, _Done)
+        assert gc.get_referrers(exc) == no_other_refs()
+
+    async def test_exception_refcycles_parent_task(self) -> None:
+        """Test that TaskGroup's cancel_scope deletes self._host_task"""
+        tg = create_task_group()
+        exc = None
+
+        class _Done(Exception):
+            pass
+
+        async def coro_fn() -> None:
+            async with tg:
+                raise _Done
+
+        try:
+            async with anyio.create_task_group() as tg2:
+                tg2.start_soon(coro_fn)
+        except ExceptionGroup as excs:
+            exc = excs.exceptions[0].exceptions[0]
+
+        assert isinstance(exc, _Done)
+        assert gc.get_referrers(exc) == no_other_refs()
+
+    async def test_exception_refcycles_propagate_cancellation_error(self) -> None:
+        """Test that TaskGroup deletes cancelled_exc"""
+        tg = anyio.create_task_group()
+        exc = None
+
+        with CancelScope() as cs:
+            cs.cancel()
+            try:
+                async with tg:
+                    await checkpoint()
+            except get_cancelled_exc_class() as e:
+                exc = e
+                raise
+
+        assert isinstance(exc, get_cancelled_exc_class())
+        assert gc.get_referrers(exc) == no_other_refs()
+
+    async def test_exception_refcycles_base_error(self) -> None:
+        """
+        Test for BaseExceptions.
+
+        anyio doesn't treat these differently so this test is redundant
+        but copied from CPython's asyncio.TaskGroup tests for completion.
+        """
+
+        class MyKeyboardInterrupt(KeyboardInterrupt):
+            pass
+
+        tg = create_task_group()
+        exc = None
+
+        try:
+            async with tg:
+                raise MyKeyboardInterrupt
+        except BaseExceptionGroup as excs:
+            exc = excs.exceptions[0]
+
+        assert isinstance(exc, MyKeyboardInterrupt)
+        assert gc.get_referrers(exc) == no_other_refs()
+
+
 class TestTaskStatusTyping:
     """
     These tests do not do anything at run time, but since the test suite is also checked
@@ -1584,3 +1757,24 @@ class TestTaskStatusTyping:
         task_status: TaskStatus[int] = TASK_STATUS_IGNORED,
     ) -> None:
         task_status.started(1)
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 12),
+    reason="Eager task factories require Python 3.12",
+)
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_eager_task_factory(request: FixtureRequest) -> None:
+    async def sync_coro() -> None:
+        # This should trigger fetching the task state
+        with CancelScope():  # noqa: ASYNC100
+            pass
+
+    loop = asyncio.get_running_loop()
+    old_task_factory = loop.get_task_factory()
+    loop.set_task_factory(asyncio.eager_task_factory)
+    request.addfinalizer(lambda: loop.set_task_factory(old_task_factory))
+
+    async with create_task_group() as tg:
+        tg.start_soon(sync_coro)
+        tg.cancel_scope.cancel()
