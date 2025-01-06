@@ -39,6 +39,18 @@ class TestAsyncFile:
         assert f.closed
         assert data == testdata
 
+    async def test_readinto(self, testdatafile: pathlib.Path, testdata: bytes) -> None:
+        buffer = bytearray(100)
+        async with await open_file(testdatafile, "rb") as f:
+            assert await f.readinto(buffer) == 100
+            assert bytes(buffer) == testdata[:100]
+
+    async def test_readinto1(self, testdatafile: pathlib.Path, testdata: bytes) -> None:
+        buffer = bytearray(100)
+        async with await open_file(testdatafile, "rb") as f:
+            assert await f.readinto1(buffer) == 100
+            assert bytes(buffer) == testdata[:100]
+
     async def test_write(self, testdatafile: pathlib.Path, testdata: bytes) -> None:
         async with await open_file(testdatafile, "ab") as f:
             await f.write(b"f" * 1000)
@@ -93,6 +105,7 @@ class TestPath:
         stdlib_properties.discard("__class_getitem__")
         stdlib_properties.discard("__enter__")
         stdlib_properties.discard("__exit__")
+        stdlib_properties.discard("__firstlineno__")
 
         async_path = Path(path)
         anyio_properties = {
@@ -191,9 +204,14 @@ class TestPath:
         reason="Path.from_uri() is only available on Python 3.13+",
     )
     def test_from_uri(self) -> None:
-        path = Path.from_uri("file:///foo/bar")
+        if platform.system() == "Windows":
+            uri = "file:///C:/foo/bar"
+        else:
+            uri = "file:///foo/bar"
+
+        path = Path.from_uri(uri)
         assert isinstance(path, Path)
-        assert path.as_uri() == "file:///foo/bar"
+        assert path.as_uri() == uri
 
     async def test_cwd(self) -> None:
         result = await Path.cwd()
@@ -308,6 +326,54 @@ class TestPath:
     def test_is_relative_to(self, arg: str, result: bool) -> None:
         assert Path("/xyz/abc/foo").is_relative_to(arg) == result
 
+    @pytest.mark.skipif(
+        sys.version_info < (3, 14),
+        reason="Path.copy() is only available on Python 3.14+",
+    )
+    async def test_copy(self, tmp_path: pathlib.Path) -> None:
+        source_path = Path(tmp_path) / "source"
+        destination_path = Path(tmp_path) / "destination"
+        await source_path.write_text("hello")
+        result = await source_path.copy(destination_path)  # type: ignore[attr-defined]
+        assert await result.read_text() == "hello"
+
+    @pytest.mark.skipif(
+        sys.version_info < (3, 14),
+        reason="Path.copy() is only available on Python 3.14+",
+    )
+    async def test_copy_into(self, tmp_path: pathlib.Path) -> None:
+        source_path = Path(tmp_path) / "source"
+        destination_path = Path(tmp_path) / "destination"
+        await destination_path.mkdir()
+        await source_path.write_text("hello")
+        result = await source_path.copy_into(destination_path)  # type: ignore[attr-defined]
+        assert await result.read_text() == "hello"
+
+    @pytest.mark.skipif(
+        sys.version_info < (3, 14),
+        reason="Path.copy() is only available on Python 3.14+",
+    )
+    async def test_move(self, tmp_path: pathlib.Path) -> None:
+        source_path = Path(tmp_path) / "source"
+        destination_path = Path(tmp_path) / "destination"
+        await source_path.write_text("hello")
+        result = await source_path.move(destination_path)  # type: ignore[attr-defined]
+        assert await result.read_text() == "hello"
+        assert not await source_path.exists()
+
+    @pytest.mark.skipif(
+        sys.version_info < (3, 14),
+        reason="Path.copy() is only available on Python 3.14+",
+    )
+    async def test_move_into(self, tmp_path: pathlib.Path) -> None:
+        source_path = Path(tmp_path) / "source"
+        destination_path = Path(tmp_path) / "destination"
+        await destination_path.mkdir()
+        await source_path.write_text("hello")
+        result = await source_path.move_into(destination_path)  # type: ignore[attr-defined]
+        assert await result.read_text() == "hello"
+        assert not await source_path.exists()
+
     async def test_glob(self, populated_tmpdir: pathlib.Path) -> None:
         all_paths = []
         async for path in Path(populated_tmpdir).glob("**/*.txt"):
@@ -381,6 +447,9 @@ class TestPath:
         assert path.stat().st_nlink == 2
         assert target.stat().st_nlink == 2
 
+    @pytest.mark.skipif(
+        platform.system() == "Windows", reason="lchmod() does not work on Windows"
+    )
     @pytest.mark.skipif(
         not hasattr(os, "lchmod"), reason="os.lchmod() is not available"
     )

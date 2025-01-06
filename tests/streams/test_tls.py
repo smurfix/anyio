@@ -5,9 +5,9 @@ import ssl
 from contextlib import AbstractContextManager, ExitStack
 from threading import Thread
 from typing import NoReturn
+from unittest import mock
 
 import pytest
-from pytest_mock import MockerFixture
 from trustme import CA
 
 from anyio import (
@@ -375,18 +375,44 @@ class TestTLSStream:
         not hasattr(ssl, "OP_IGNORE_UNEXPECTED_EOF"),
         reason="The ssl module does not have the OP_IGNORE_UNEXPECTED_EOF attribute",
     )
-    async def test_default_context_ignore_unexpected_eof_flag_off(
-        self, mocker: MockerFixture
-    ) -> None:
+    async def test_default_context_ignore_unexpected_eof_flag_off(self) -> None:
         send1, receive1 = create_memory_object_stream[bytes]()
         client_stream = StapledObjectStream(send1, receive1)
-        mocker.patch.object(TLSStream, "_call_sslobject_method")
-        tls_stream = await TLSStream.wrap(client_stream)
-        ssl_context = tls_stream.extra(TLSAttribute.ssl_object).context
-        assert not ssl_context.options & ssl.OP_IGNORE_UNEXPECTED_EOF
+        with mock.patch.object(TLSStream, "_call_sslobject_method"):
+            tls_stream = await TLSStream.wrap(client_stream)
+            ssl_context = tls_stream.extra(TLSAttribute.ssl_object).context
+            assert not ssl_context.options & ssl.OP_IGNORE_UNEXPECTED_EOF
 
-        send1.close()
-        receive1.close()
+            send1.close()
+            receive1.close()
+
+    async def test_truststore_ssl(
+        self, request: pytest.FixtureRequest, server_context: ssl.SSLContext
+    ) -> None:
+        # This test is only expected to fail on Windows without the associated patch
+        def serve_sync() -> None:
+            with server_sock, pytest.raises(ssl.SSLEOFError):
+                server_sock.accept()
+
+        # We deliberately skip making the client context trust the server context
+        truststore = pytest.importorskip("truststore")
+        client_context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+        server_sock = server_context.wrap_socket(
+            socket.socket(), server_side=True, suppress_ragged_eofs=True
+        )
+        server_sock.settimeout(1)
+        server_sock.bind(("127.0.0.1", 0))
+        server_sock.listen()
+        server_thread = Thread(target=serve_sync, daemon=True)
+        server_thread.start()
+        request.addfinalizer(server_thread.join)
+
+        async with await connect_tcp(*server_sock.getsockname()) as stream:
+            with pytest.raises(ssl.SSLCertVerificationError):
+                await TLSStream.wrap(
+                    stream, hostname="localhost", ssl_context=client_context
+                )
 
 
 class TestTLSListener:

@@ -33,6 +33,8 @@ from anyio.abc import TaskStatus
 from anyio.from_thread import BlockingPortal, start_blocking_portal
 from anyio.lowlevel import checkpoint
 
+from .conftest import asyncio_params
+
 if sys.version_info < (3, 11):
     from exceptiongroup import ExceptionGroup
 
@@ -419,6 +421,7 @@ class TestBlockingPortal:
         self, anyio_backend_name: str, anyio_backend_options: dict[str, Any]
     ) -> None:
         cancelled = False
+        done_event = threading.Event()
 
         async def event_waiter() -> None:
             nonlocal cancelled
@@ -426,10 +429,13 @@ class TestBlockingPortal:
                 await sleep(3)
             except get_cancelled_exc_class():
                 cancelled = True
+            finally:
+                done_event.set()
 
         with start_blocking_portal(anyio_backend_name, anyio_backend_options) as portal:
             future = portal.start_task_soon(event_waiter)
             future.cancel()
+            done_event.wait(10)
 
         assert cancelled
 
@@ -591,7 +597,7 @@ class TestBlockingPortal:
 
         assert propagated_value == 6
 
-    @pytest.mark.parametrize("anyio_backend", ["asyncio"])
+    @pytest.mark.parametrize("anyio_backend", asyncio_params)
     async def test_asyncio_run_sync_called(self, caplog: LogCaptureFixture) -> None:
         """Regression test for #357."""
 
