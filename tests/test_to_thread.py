@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import sys
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -22,6 +24,8 @@ from anyio import (
     wait_all_tasks_blocked,
 )
 from anyio.from_thread import BlockingPortalProvider
+
+from .conftest import asyncio_params, no_other_refs
 
 pytestmark = pytest.mark.anyio
 
@@ -159,7 +163,7 @@ async def test_asynclib_detection() -> None:
         await to_thread.run_sync(sniffio.current_async_library)
 
 
-@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+@pytest.mark.parametrize("anyio_backend", asyncio_params)
 async def test_asyncio_cancel_native_task() -> None:
     task: asyncio.Task[None] | None = None
 
@@ -358,3 +362,30 @@ class TestBlockingPortalProvider:
                 portal.call(event.set)
 
         assert len(threads) == 1
+
+
+@pytest.mark.skipif(
+    sys.implementation.name == "pypy",
+    reason=(
+        "gc.get_referrers is broken on PyPy (see "
+        "https://github.com/pypy/pypy/issues/5075)"
+    ),
+)
+async def test_run_sync_worker_cyclic_references() -> None:
+    class Foo:
+        pass
+
+    def foo(_: Foo) -> None:
+        pass
+
+    cvar = ContextVar[Foo]("cvar")
+    contextval = Foo()
+    arg = Foo()
+    cvar.set(contextval)
+    await to_thread.run_sync(foo, arg)
+    cvar.set(Foo())
+    gc.collect()
+
+    assert gc.get_referrers(contextval) == no_other_refs()
+    assert gc.get_referrers(foo) == no_other_refs()
+    assert gc.get_referrers(arg) == no_other_refs()
