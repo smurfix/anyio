@@ -1,3 +1,27 @@
+anyio (4.9.9.1) smurf; urgency=medium
+
+  * Interim Merge
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Wed, 21 May 2025 12:15:16 +0200
+
+anyio (4.9.0.2) smurf; urgency=medium
+
+  * Needs current typing-extensions
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Fri, 21 Mar 2025 17:34:51 +0100
+
+anyio (4.9.0.1) smurf; urgency=medium
+
+  * Merge
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Fri, 21 Mar 2025 17:04:14 +0100
+
+anyio (4.8.0.1) smurf; urgency=medium
+
+  * Merge
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Mon, 06 Jan 2025 15:29:20 +0100
+
 anyio (4.7.0.3) smurf; urgency=medium
 
   * Depend on typing-extensions 4.5.

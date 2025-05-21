@@ -3,6 +3,24 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
+**4.8.0**
+
+- Added **experimental** support for running functions in subinterpreters on Python
+  3.13 and later
+- Added support for the ``copy()``, ``copy_into()``, ``move()`` and ``move_into()``
+  methods in ``anyio.Path``, available in Python 3.14
+- Changed ``TaskGroup`` on asyncio to always spawn tasks non-eagerly, even if using a
+  task factory created via ``asyncio.create_eager_task_factory()``, to preserve expected
+  Trio-like task scheduling semantics (PR by @agronholm and @graingert)
+- Configure ``SO_RCVBUF``, ``SO_SNDBUF`` and ``TCP_NODELAY`` on the selector
+  thread waker socket pair (this should improve the performance of ``wait_readable()``)
+  and ``wait_writable()`` when using the ``ProactorEventLoop``
+  (`#836 <https://github.com/agronholm/anyio/pull/836>`_; PR by @graingert)
+- Fixed ``AssertionError`` when using ``nest-asyncio``
+  (`#840 <https://github.com/agronholm/anyio/issues/840>`_)
+- Fixed return type annotation of various context managers' ``__exit__`` method
+  (`#847 <https://github.com/agronholm/anyio/issues/847>`_; PR by @Enegg)
+
 **4.7.0**
 
 - Updated ``TaskGroup`` to work with asyncio's eager task factories
