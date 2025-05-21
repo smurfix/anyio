@@ -1,6 +1,6 @@
 [build-system]
 requires = [
-    "setuptools >= 64",
+    "setuptools >= 77",
     "setuptools_scm >= 6.4"
 ]
 build-backend = "setuptools.build_meta"
@@ -10,11 +10,10 @@ name = "anyio"
 description = "High level compatibility layer for multiple asynchronous event loop implementations"
 readme = "README.rst"
 authors = [{name = "Alex Grönholm", email = "alex.gronholm@nextday.fi"}]
-license = {text = "MIT"}
+license = "MIT"
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Framework :: AnyIO",
     "Typing :: Typed",
     "Programming Language :: Python",
@@ -42,6 +41,11 @@ Changelog = "https://anyio.readthedocs.io/en/stable/versionhistory.html"
 
 [project.optional-dependencies]
 trio = ["trio >= 0.26.1"]
+
+[project.entry-points]
+pytest11 = {anyio = "anyio.pytest_plugin"}
+
+[dependency-groups]
 test = [
     "anyio[trio]",
     "blockbuster >= 1.5.23",
@@ -63,10 +67,8 @@ doc = [
     "Sphinx ~= 8.2",
     "sphinx_rtd_theme",
     "sphinx-autodoc-typehints >= 1.2.0",
+    "sphinx-tabs >= 3.3.1",
 ]
-
-[project.entry-points]
-pytest11 = {anyio = "anyio.pytest_plugin"}
 
 [tool.setuptools_scm]
 version_scheme = "post-release"
@@ -78,15 +80,18 @@ src = ["src"]
 [tool.ruff.lint]
 extend-select = [
     "ASYNC",        # flake8-async
-    "W",            # pycodestyle warnings
+    "C4",           # flake8-comprehensions
     "G",            # flake8-logging-format
     "I",            # isort
     "ISC",          # flake8-implicit-str-concat
+    "PERF",         # flake8-performance
     "PGH",          # pygrep-hooks
     "RUF100",       # unused noqa (yesqa)
     "T201",         # print
     "UP",           # pyupgrade
+    "W",            # pycodestyle warnings
 ]
+ignore = ["PERF203"]
 
 [tool.ruff.lint.isort]
 "required-imports" = ["from __future__ import annotations"]
@@ -125,16 +130,21 @@ relative_files = true
 
 [tool.coverage.report]
 show_missing = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "@(abc\\.)?abstractmethod",
+]
 
 [tool.tox]
 env_list = ["pre-commit", "py39", "py310", "py311", "py312", "py313", "py314", "pypy3"]
 skip_missing_interpreters = true
+requires = ["tox >= 4.22"]
 
 [tool.tox.env_run_base]
 depends = ["pre-commit"]
 package = "editable"
 commands = [["coverage", "run", "-m", "pytest", { replace = "posargs", extend = true }]]
-extras = ["test"]
+dependency_groups = ["test"]
 
 [tool.tox.env.pypy3]
 commands = [["pytest", { replace = "posargs", extend = true }]]
@@ -151,5 +161,5 @@ commands = [["pyright", "--verifytypes", "anyio"]]
 
 [tool.tox.env.docs]
 depends = []
-extras = ["doc"]
+dependency_groups = ["doc"]
 commands = [["sphinx-build", "-W", "docs", "build/sphinx"]]

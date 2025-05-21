@@ -3,10 +3,32 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
+**UNRELEASED**
+
+- Added context manager mix-in classes (``anyio.ContextManagerMixin`` and
+  ``anyio.AsyncContextManagerMixin``) to help write classes that embed other context
+  managers, particularly cancel scopes or task groups
+  (`#905 <https://github.com/agronholm/anyio/pull/905>`_; PR by by @agronholm and
+  @tapetersen)
+- Added the ability to specify the thread name in ``start_blocking_portal()``
+  (`#818 <https://github.com/agronholm/anyio/issues/818>`_; PR by @davidbrochart)
+- Added ``anyio.notify_closing`` to allow waking ``anyio.wait_readable``
+  and ``anyio.wait_writable`` before closing a socket. Among other things,
+  this prevents an OSError on the ``ProactorEventLoop``.
+  (`#896 <https://github.com/agronholm/anyio/pull/896>`_; PR by @graingert)
+- Fixed ``anyio.Path.copy()`` and ``anyio.Path.copy_into()`` failing on Python 3.14.0a7
+- Fixed return annotation of ``__aexit__`` on async context managers. CMs which can
+  suppress exceptions should return ``bool``, or ``None`` otherwise.
+  (`#913 <https://github.com/agronholm/anyio/pull/913>`_; PR by @Enegg)
+- Fixed rollover boundary check in ``SpooledTemporaryFile`` so that rollover
+  only occurs when the buffer size exceeds ``max_size``
+  (`#915 <https://github.com/agronholm/anyio/pull/915>`_; PR by @11kkw)
+- Migrated testing and documentation dependencies from extras to dependency groups
+
 **4.9.0**
 
-- Fixed ``connect_tcp()`` producing cyclic references in tracebacks when raising
-  exceptions (`#809 <https://github.com/agronholm/anyio/pull/809>`_; PR by @graingert)
+- Added async support for temporary file handling
+  (`#344 <https://github.com/agronholm/anyio/issues/344>`_; PR by @11kkw)
 - Added 4 new fixtures for the AnyIO ``pytest`` plugin:
 
   * ``free_tcp_port_factory``: session scoped fixture returning a callable that
@@ -33,6 +55,8 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 - Fixed ``anyio.Path.iterdir()`` making a blocking call in Python 3.13
   (`#873 <https://github.com/agronholm/anyio/issues/873>`_; PR by @cbornet and
   @agronholm)
+- Fixed ``connect_tcp()`` producing cyclic references in tracebacks when raising
+  exceptions (`#809 <https://github.com/agronholm/anyio/pull/809>`_; PR by @graingert)
 - Fixed ``anyio.to_thread.run_sync()`` needlessly holding on to references of the
   context, function, arguments and others until the next work item on asyncio
   (PR by @Wankupi)
