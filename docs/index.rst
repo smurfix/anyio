@@ -20,7 +20,9 @@ The manual
    subprocesses
    subinterpreters
    fileio
+   tempfile
    signals
+   contextmanagers
    testing
    api
    migration

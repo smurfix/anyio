@@ -28,7 +28,7 @@ else:
     from typing_extensions import TypeAlias
 
 if TYPE_CHECKING:
-    from _typeshed import HasFileno
+    from _typeshed import FileDescriptorLike
 
     from .._core._synchronization import CapacityLimiter, Event, Lock, Semaphore
     from .._core._tasks import CancelScope
@@ -315,13 +315,13 @@ class AsyncBackend(metaclass=ABCMeta):
         type: int | SocketKind = 0,
         proto: int = 0,
         flags: int = 0,
-    ) -> list[
+    ) -> Sequence[
         tuple[
             AddressFamily,
             SocketKind,
             int,
             str,
-            tuple[str, int] | tuple[str, int, int, int],
+            tuple[str, int] | tuple[str, int, int, int] | tuple[int, bytes],
         ]
     ]:
         pass
@@ -335,12 +335,17 @@ class AsyncBackend(metaclass=ABCMeta):
 
     @classmethod
     @abstractmethod
-    async def wait_readable(cls, obj: HasFileno | int) -> None:
+    async def wait_readable(cls, obj: FileDescriptorLike) -> None:
         pass
 
     @classmethod
     @abstractmethod
-    async def wait_writable(cls, obj: HasFileno | int) -> None:
+    async def wait_writable(cls, obj: FileDescriptorLike) -> None:
+        pass
+
+    @classmethod
+    @abstractmethod
+    def notify_closing(cls, obj: FileDescriptorLike) -> None:
         pass
 
     @classmethod

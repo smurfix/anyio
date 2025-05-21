@@ -18,6 +18,7 @@ from socket import AddressFamily
 from ssl import SSLContext, SSLError
 from threading import Thread
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeVar, cast
+from unittest import mock
 
 import psutil
 import pytest
@@ -46,12 +47,14 @@ from anyio import (
     getaddrinfo,
     getnameinfo,
     move_on_after,
+    notify_closing,
     wait_all_tasks_blocked,
     wait_readable,
     wait_socket_readable,
     wait_socket_writable,
     wait_writable,
 )
+from anyio._core._eventloop import get_async_backend
 from anyio.abc import (
     IPSockAddrType,
     Listener,
@@ -62,7 +65,7 @@ from anyio.abc import (
 from anyio.lowlevel import checkpoint
 from anyio.streams.stapled import MultiListener
 
-from .conftest import asyncio_params
+from .conftest import asyncio_params, no_other_refs
 
 if sys.version_info < (3, 11):
     from exceptiongroup import ExceptionGroup
@@ -140,6 +143,14 @@ def _identity(v: _T) -> _T:
     return v
 
 
+def fill_socket(sock: socket.socket) -> None:
+    try:
+        while True:
+            sock.send(b"x" * 65536)
+    except BlockingIOError:
+        pass
+
+
 #  _ProactorBasePipeTransport.abort() after _ProactorBasePipeTransport.close()
 # does not cancel writes: https://bugs.python.org/issue44428
 _ignore_win32_resource_warnings = (
@@ -147,7 +158,7 @@ _ignore_win32_resource_warnings = (
         "ignore:unclosed <socket.socket:ResourceWarning",
         "ignore:unclosed transport <_ProactorSocketTransport closing:ResourceWarning",
     )
-    if sys.platform == "win32"
+    if sys.version_info < (3, 10) and sys.platform == "win32"
     else _identity
 )
 
@@ -315,6 +326,34 @@ class TestTCPStream:
         server_sock.close()
         assert client_addr[0] == expected_client_addr
 
+    @pytest.mark.skipif(
+        sys.implementation.name == "pypy",
+        reason=(
+            "gc.get_referrers is broken on PyPy (see "
+            "https://github.com/pypy/pypy/issues/5075)"
+        ),
+    )
+    async def test_happy_eyeballs_refcycles(
+        self, free_tcp_port: int, anyio_backend_name: str
+    ) -> None:
+        """
+        Test derived from https://github.com/python/cpython/pull/124859
+        """
+        if anyio_backend_name == "asyncio" and sys.version_info < (3, 10):
+            pytest.skip(
+                "asyncio.BaseEventLoop.create_connection creates refcycles on py 3.9"
+            )
+
+        exc = None
+        try:
+            async with await connect_tcp("127.0.0.1", free_tcp_port):
+                pass
+        except OSError as e:
+            exc = e.__cause__
+
+        assert isinstance(exc, OSError)
+        assert gc.get_referrers(exc) == no_other_refs()
+
     @pytest.mark.parametrize(
         "target, exception_class",
         [
@@ -329,14 +368,10 @@ class TestTCPStream:
         target: str,
         exception_class: type[ExceptionGroup] | type[ConnectionRefusedError],
         fake_localhost_dns: None,
+        free_tcp_port: int,
     ) -> None:
-        dummy_socket = socket.socket(AddressFamily.AF_INET6)
-        dummy_socket.bind(("::", 0))
-        free_port = dummy_socket.getsockname()[1]
-        dummy_socket.close()
-
         with pytest.raises(OSError) as exc:
-            await connect_tcp(target, free_port)
+            await connect_tcp(target, free_tcp_port)
 
         assert exc.match("All connection attempts failed")
         assert isinstance(exc.value.__cause__, exception_class)
@@ -984,11 +1019,8 @@ class TestUNIXStream:
 
         thread = Thread(target=serve, daemon=True)
         thread.start()
-        chunks = []
         async with await connect_unix(socket_path) as stream:
-            async for chunk in stream:
-                chunks.append(chunk)
-
+            chunks = [chunk async for chunk in stream]
         thread.join()
         assert chunks == [b"bl", b"ah"]
 
@@ -1846,6 +1878,14 @@ async def test_getaddrinfo_ipv6addr(
     ]
 
 
+async def test_getaddrinfo_ipv6_disabled() -> None:
+    gai_result = [
+        (AddressFamily.AF_INET6, socket.SocketKind.SOCK_STREAM, 6, "", (1, b""))
+    ]
+    with mock.patch.object(get_async_backend(), "getaddrinfo", return_value=gai_result):
+        assert await getaddrinfo("::1", 0) == []
+
+
 async def test_getnameinfo() -> None:
     expected_result = socket.getnameinfo(("127.0.0.1", 6666), 0)
     result = await getnameinfo(("127.0.0.1", 6666))
@@ -1901,3 +1941,30 @@ async def test_deprecated_wait_socket(anyio_backend_name: str) -> None:
         ):
             with move_on_after(0.1):
                 await wait_socket_writable(sock)
+
+
+@pytest.mark.parametrize("socket_type", ["socket", "fd"])
+async def test_interrupted_by_close(socket_type: str) -> None:
+    a_sock, b = socket.socketpair()
+    with a_sock, b:
+        a_sock.setblocking(False)
+        b.setblocking(False)
+
+        a: FileDescriptorLike = a_sock.fileno() if socket_type == "fd" else a_sock
+
+        async def reader() -> None:
+            with pytest.raises(ClosedResourceError):
+                await wait_readable(a)
+
+        async def writer() -> None:
+            with pytest.raises(ClosedResourceError):
+                await wait_writable(a)
+
+        fill_socket(a_sock)
+
+        async with create_task_group() as tg:
+            tg.start_soon(reader)
+            tg.start_soon(writer)
+            await wait_all_tasks_blocked()
+            notify_closing(a_sock)
+            a_sock.close()

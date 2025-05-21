@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ._core._contextmanagers import AsyncContextManagerMixin as AsyncContextManagerMixin
+from ._core._contextmanagers import ContextManagerMixin as ContextManagerMixin
 from ._core._eventloop import current_time as current_time
 from ._core._eventloop import get_all_backends as get_all_backends
 from ._core._eventloop import get_cancelled_exc_class as get_cancelled_exc_class
@@ -35,6 +37,7 @@ from ._core._sockets import create_unix_datagram_socket as create_unix_datagram_
 from ._core._sockets import create_unix_listener as create_unix_listener
 from ._core._sockets import getaddrinfo as getaddrinfo
 from ._core._sockets import getnameinfo as getnameinfo
+from ._core._sockets import notify_closing as notify_closing
 from ._core._sockets import wait_readable as wait_readable
 from ._core._sockets import wait_socket_readable as wait_socket_readable
 from ._core._sockets import wait_socket_writable as wait_socket_writable
@@ -61,6 +64,14 @@ from ._core._tasks import create_task_group as create_task_group
 from ._core._tasks import current_effective_deadline as current_effective_deadline
 from ._core._tasks import fail_after as fail_after
 from ._core._tasks import move_on_after as move_on_after
+from ._core._tempfile import NamedTemporaryFile as NamedTemporaryFile
+from ._core._tempfile import SpooledTemporaryFile as SpooledTemporaryFile
+from ._core._tempfile import TemporaryDirectory as TemporaryDirectory
+from ._core._tempfile import TemporaryFile as TemporaryFile
+from ._core._tempfile import gettempdir as gettempdir
+from ._core._tempfile import gettempdirb as gettempdirb
+from ._core._tempfile import mkdtemp as mkdtemp
+from ._core._tempfile import mkstemp as mkstemp
 from ._core._testing import TaskInfo as TaskInfo
 from ._core._testing import get_current_task as get_current_task
 from ._core._testing import get_running_tasks as get_running_tasks

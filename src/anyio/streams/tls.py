@@ -14,9 +14,15 @@ from .. import (
     EndOfStream,
     aclose_forcefully,
     get_cancelled_exc_class,
+    to_thread,
 )
 from .._core._typedattr import TypedAttributeSet, typed_attribute
 from ..abc import AnyByteStream, ByteStream, Listener, TaskGroup
+
+if sys.version_info >= (3, 10):
+    from typing import TypeAlias
+else:
+    from typing_extensions import TypeAlias
 
 if sys.version_info >= (3, 11):
     from typing import TypeVarTuple, Unpack
@@ -25,8 +31,8 @@ else:
 
 T_Retval = TypeVar("T_Retval")
 PosArgsT = TypeVarTuple("PosArgsT")
-_PCTRTT = tuple[tuple[str, str], ...]
-_PCTRTTT = tuple[_PCTRTT, ...]
+_PCTRTT: TypeAlias = tuple[tuple[str, str], ...]
+_PCTRTTT: TypeAlias = tuple[_PCTRTT, ...]
 
 
 class TLSAttribute(TypedAttributeSet):
@@ -119,9 +125,23 @@ class TLSStream(ByteStream):
 
         bio_in = ssl.MemoryBIO()
         bio_out = ssl.MemoryBIO()
-        ssl_object = ssl_context.wrap_bio(
-            bio_in, bio_out, server_side=server_side, server_hostname=hostname
-        )
+
+        # External SSLContext implementations may do blocking I/O in wrap_bio(),
+        # but the standard library implementation won't
+        if type(ssl_context) is ssl.SSLContext:
+            ssl_object = ssl_context.wrap_bio(
+                bio_in, bio_out, server_side=server_side, server_hostname=hostname
+            )
+        else:
+            ssl_object = await to_thread.run_sync(
+                ssl_context.wrap_bio,
+                bio_in,
+                bio_out,
+                server_side,
+                hostname,
+                None,
+            )
+
         wrapper = cls(
             transport_stream=transport_stream,
             standard_compatible=standard_compatible,
