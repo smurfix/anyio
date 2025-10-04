@@ -240,3 +240,76 @@ having to pass the path every time you send data to the peer::
             await unix_dg.send(b'Hi there!\n')
 
     run(main)
+
+Wrapping existing sockets as streams or listeners
+-------------------------------------------------
+
+In some cases, you might want to create a socket in third party code and wrap that as an
+AnyIO stream or socket listener. For that, various class methods exist:
+
+* :meth:`.abc.SocketListener.from_socket`
+* :meth:`.abc.SocketStream.from_socket`
+* :meth:`.abc.UNIXSocketStream.from_socket`
+* :meth:`.abc.UDPSocket.from_socket`
+* :meth:`.abc.ConnectedUDPSocket.from_socket`
+* :meth:`.abc.UNIXDatagramSocket.from_socket`
+* :meth:`.abc.ConnectedUNIXDatagramSocket.from_socket`
+
+.. _connectables:
+
+Abstracting remote connections using Connectables
+-------------------------------------------------
+
+AnyIO offers a hierarchy of classes implementing either the
+:class:`.abc.ObjectStreamConnectable` or :class:`.abc.ByteStreamConnectable` interfaces
+which lets developers abstract out the connection mechanism for network clients.
+For example, you could create a network client class like this::
+
+    from os import PathLike
+    from ssl import SSLContext
+
+    from anyio.abc import ByteStreamConnectable, as_connectable
+
+
+    class MyNetworkClient:
+        def __init__(
+            self,
+            connectable: ByteStreamConnectable | tuple[str, int] | str | PathLike[str],
+            tls: bool | SSLContext = False
+        ):
+            self.connectable = as_connectable(connectable, tls)
+
+        async def __aenter__(self):
+            # Connect to the remote and enter the stream's context manager
+            self._stream = await self.connectable.connect()
+            await self._stream.__aenter__()
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            # Exit the stream's context manager, thus disconnecting it
+            await self._stream.__aexit__(exc_type, exc_val, exc_tb)
+
+Here's a dissection of the type annotation for ``connectable``:
+
+* :class:`.abc.ByteStreamConnectable`: allows for any arbitrary bytestream connectable
+* ``tuple[str, int]``: TCP host/port
+* ``str | bytes | PathLike[str]``: file system path to a UNIX socket
+
+The :func:`as_connectable` function is a convenience that lets users instantiate your
+client without the hassle of manually instantiating a connectable like
+:class:`TCPConnectable` or :class:`UNIXConnectable`.
+
+So why bother jumping through these extra hoops? Because it gives users the flexibility
+of using more exotic transports, such as:
+
+* Mock streams (for testing)
+* Interceptor streams (for testing network delays, stalled connections, etc.)
+* SOCKS proxies
+* HTTP tunneling via ``CONNECT``
+
+In particular, tunneling using AnyIO streams rather than external connectors has the
+advantage of allowing passthrough of information such as the peer address via
+:meth:`~TypedAttributeProvider.extra`.
+
+In addition to that, it greatly simplifies adding support for TLS and transports other
+than TCP.
