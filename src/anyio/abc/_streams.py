@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from abc import abstractmethod
+from abc import ABCMeta, abstractmethod
 from collections.abc import Callable
 from typing import Any, Generic, TypeVar, Union
 
@@ -40,7 +40,7 @@ class UnreliableObjectReceiveStream(
         try:
             return await self.receive()
         except EndOfStream:
-            raise StopAsyncIteration
+            raise StopAsyncIteration from None
 
     @abstractmethod
     async def receive(self) -> T_co:
@@ -136,7 +136,7 @@ class ByteReceiveStream(AsyncResource, TypedAttributeProvider):
         try:
             return await self.receive()
         except EndOfStream:
-            raise StopAsyncIteration
+            raise StopAsyncIteration from None
 
     @abstractmethod
     async def receive(self, max_bytes: int = 65536) -> bytes:
@@ -209,3 +209,31 @@ class Listener(Generic[T_co], AsyncResource, TypedAttributeProvider):
         :param task_group: the task group that will be used to start tasks for handling
             each accepted connection (if omitted, an ad-hoc task group will be created)
         """
+
+
+class ObjectStreamConnectable(Generic[T_co], metaclass=ABCMeta):
+    @abstractmethod
+    async def connect(self) -> ObjectStream[T_co]:
+        """
+        Connect to the remote endpoint.
+
+        :return: an object stream connected to the remote end
+        :raises ConnectionFailed: if the connection fails
+        """
+
+
+class ByteStreamConnectable(metaclass=ABCMeta):
+    @abstractmethod
+    async def connect(self) -> ByteStream:
+        """
+        Connect to the remote endpoint.
+
+        :return: a bytestream connected to the remote end
+        :raises ConnectionFailed: if the connection fails
+        """
+
+
+#: Type alias for all connectables returning bytestreams or bytes-oriented object streams
+AnyByteStreamConnectable: TypeAlias = Union[
+    ObjectStreamConnectable[bytes], ByteStreamConnectable
+]

@@ -54,6 +54,7 @@ from .. import (
     CapacityLimiterStatistics,
     EventStatistics,
     LockStatistics,
+    RunFinishedError,
     TaskInfo,
     WouldBlock,
     abc,
@@ -136,8 +137,8 @@ class CancelScope(BaseCancelScope):
     ) -> bool:
         return self.__original.__exit__(exc_type, exc_val, exc_tb)
 
-    def cancel(self) -> None:
-        self.__original.cancel()
+    def cancel(self, reason: str | None = None) -> None:
+        self.__original.cancel(reason)
 
     @property
     def deadline(self) -> float:
@@ -273,7 +274,7 @@ class ReceiveStreamWrapper(abc.ByteReceiveStream):
             raise BrokenResourceError from exc.__cause__
 
         if data:
-            return data
+            return bytes(data)
         else:
             raise EndOfStream
 
@@ -1094,7 +1095,11 @@ class TrioBackend(AsyncBackend):
         args: tuple[Unpack[PosArgsT]],
         token: object,
     ) -> T_Retval:
-        return trio.from_thread.run(func, *args)
+        trio_token = cast("trio.lowlevel.TrioToken | None", token)
+        try:
+            return trio.from_thread.run(func, *args, trio_token=trio_token)
+        except trio.RunFinishedError:
+            raise RunFinishedError from None
 
     @classmethod
     def run_sync_from_thread(
@@ -1103,7 +1108,11 @@ class TrioBackend(AsyncBackend):
         args: tuple[Unpack[PosArgsT]],
         token: object,
     ) -> T_Retval:
-        return trio.from_thread.run_sync(func, *args)
+        trio_token = cast("trio.lowlevel.TrioToken | None", token)
+        try:
+            return trio.from_thread.run_sync(func, *args, trio_token=trio_token)
+        except trio.RunFinishedError:
+            raise RunFinishedError from None
 
     @classmethod
     def create_blocking_portal(cls) -> abc.BlockingPortal:
@@ -1285,6 +1294,42 @@ class TrioBackend(AsyncBackend):
     @classmethod
     def notify_closing(cls, obj: FileDescriptorLike) -> None:
         notify_closing(obj)
+
+    @classmethod
+    async def wrap_listener_socket(cls, sock: socket.socket) -> abc.SocketListener:
+        return TCPSocketListener(sock)
+
+    @classmethod
+    async def wrap_stream_socket(cls, sock: socket.socket) -> SocketStream:
+        trio_sock = trio.socket.from_stdlib_socket(sock)
+        return SocketStream(trio_sock)
+
+    @classmethod
+    async def wrap_unix_stream_socket(cls, sock: socket.socket) -> UNIXSocketStream:
+        trio_sock = trio.socket.from_stdlib_socket(sock)
+        return UNIXSocketStream(trio_sock)
+
+    @classmethod
+    async def wrap_udp_socket(cls, sock: socket.socket) -> UDPSocket:
+        trio_sock = trio.socket.from_stdlib_socket(sock)
+        return UDPSocket(trio_sock)
+
+    @classmethod
+    async def wrap_connected_udp_socket(cls, sock: socket.socket) -> ConnectedUDPSocket:
+        trio_sock = trio.socket.from_stdlib_socket(sock)
+        return ConnectedUDPSocket(trio_sock)
+
+    @classmethod
+    async def wrap_unix_datagram_socket(cls, sock: socket.socket) -> UNIXDatagramSocket:
+        trio_sock = trio.socket.from_stdlib_socket(sock)
+        return UNIXDatagramSocket(trio_sock)
+
+    @classmethod
+    async def wrap_connected_unix_datagram_socket(
+        cls, sock: socket.socket
+    ) -> ConnectedUNIXDatagramSocket:
+        trio_sock = trio.socket.from_stdlib_socket(sock)
+        return ConnectedUNIXDatagramSocket(trio_sock)
 
     @classmethod
     def current_default_thread_limiter(cls) -> CapacityLimiter:

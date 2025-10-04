@@ -80,8 +80,10 @@ class AsyncBackend(metaclass=ABCMeta):
     @abstractmethod
     def current_token(cls) -> object:
         """
+        Return an object that allows other threads to run code inside the event loop.
 
-        :return:
+        :return: a token object, specific to the event loop running in the current
+            thread
         """
 
     @classmethod
@@ -346,6 +348,43 @@ class AsyncBackend(metaclass=ABCMeta):
     @classmethod
     @abstractmethod
     def notify_closing(cls, obj: FileDescriptorLike) -> None:
+        pass
+
+    @classmethod
+    @abstractmethod
+    async def wrap_listener_socket(cls, sock: socket) -> SocketListener:
+        pass
+
+    @classmethod
+    @abstractmethod
+    async def wrap_stream_socket(cls, sock: socket) -> SocketStream:
+        pass
+
+    @classmethod
+    @abstractmethod
+    async def wrap_unix_stream_socket(cls, sock: socket) -> UNIXSocketStream:
+        pass
+
+    @classmethod
+    @abstractmethod
+    async def wrap_udp_socket(cls, sock: socket) -> UDPSocket:
+        pass
+
+    @classmethod
+    @abstractmethod
+    async def wrap_connected_udp_socket(cls, sock: socket) -> ConnectedUDPSocket:
+        pass
+
+    @classmethod
+    @abstractmethod
+    async def wrap_unix_datagram_socket(cls, sock: socket) -> UNIXDatagramSocket:
+        pass
+
+    @classmethod
+    @abstractmethod
+    async def wrap_connected_unix_datagram_socket(
+        cls, sock: socket
+    ) -> ConnectedUNIXDatagramSocket:
         pass
 
     @classmethod

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import array
+import errno
 import gc
 import io
 import os
@@ -13,12 +14,14 @@ import threading
 import time
 from collections.abc import Generator, Iterable, Iterator
 from contextlib import suppress
+from ipaddress import IPv4Address, IPv6Address
 from pathlib import Path
 from socket import AddressFamily
 from ssl import SSLContext, SSLError
 from threading import Thread
-from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, TypeVar, cast
 from unittest import mock
+from unittest.mock import MagicMock, patch
 
 import psutil
 import pytest
@@ -26,6 +29,8 @@ from _pytest.fixtures import SubRequest
 from _pytest.logging import LogCaptureFixture
 from _pytest.monkeypatch import MonkeyPatch
 from _pytest.tmpdir import TempPathFactory
+from pytest import FixtureRequest
+from pytest_mock.plugin import MockerFixture
 
 from anyio import (
     BrokenResourceError,
@@ -33,7 +38,10 @@ from anyio import (
     ClosedResourceError,
     EndOfStream,
     Event,
+    TCPConnectable,
     TypedAttributeLookupError,
+    UNIXConnectable,
+    as_connectable,
     connect_tcp,
     connect_unix,
     create_connected_udp_socket,
@@ -56,14 +64,20 @@ from anyio import (
 )
 from anyio._core._eventloop import get_async_backend
 from anyio.abc import (
+    ConnectedUDPSocket,
+    ConnectedUNIXDatagramSocket,
     IPSockAddrType,
     Listener,
     SocketAttribute,
     SocketListener,
     SocketStream,
+    UDPSocket,
+    UNIXDatagramSocket,
+    UNIXSocketStream,
 )
 from anyio.lowlevel import checkpoint
 from anyio.streams.stapled import MultiListener
+from anyio.streams.tls import TLSConnectable
 
 from .conftest import asyncio_params, no_other_refs
 
@@ -76,8 +90,6 @@ if TYPE_CHECKING:
 AnyIPAddressFamily = Literal[
     AddressFamily.AF_UNSPEC, AddressFamily.AF_INET, AddressFamily.AF_INET6
 ]
-
-pytestmark = pytest.mark.anyio
 
 # If a socket can bind to ::1, the current environment has IPv6 properly configured
 has_ipv6 = False
@@ -134,6 +146,60 @@ def check_asyncio_bug(anyio_backend_name: str, family: AnyIPAddressFamily) -> No
         policy = asyncio.get_event_loop_policy()
         if policy.__class__.__name__ == "WindowsProactorEventLoopPolicy":
             pytest.skip("Does not work due to a known bug (39148)")
+
+
+class SockFdFactoryProtocol(Protocol):
+    def __call__(
+        self,
+        family: socket.AddressFamily,
+        kind: socket.SocketKind,
+        *,
+        bound: bool = False,
+        connected: bool = False,
+    ) -> socket.socket | int: ...
+
+
+@pytest.fixture(
+    params=[pytest.param(False, id="sock"), pytest.param(True, id="fileno")]
+)
+def sock_or_fd_factory(
+    request: SubRequest, tmp_path_factory: TempPathFactory
+) -> SockFdFactoryProtocol:
+    def factory(
+        family: socket.AddressFamily,
+        kind: socket.SocketKind,
+        *,
+        bound: bool = False,
+        connected: bool = False,
+    ) -> socket.socket | int:
+        sock = socket.socket(family, kind)
+
+        if bound or connected:
+            if family in (socket.AF_INET, socket.AF_INET6):
+                local_addr: str | tuple[str, int] = ("localhost", 0)
+            else:
+                local_addr = str(tmp_path_factory.mktemp("anyio") / "socket")
+
+        if bound:
+            sock.bind(local_addr)
+            if kind == socket.SOCK_STREAM:
+                sock.listen()
+        elif connected:
+            server_sock = socket.socket(family, kind)
+            request.addfinalizer(server_sock.close)
+            server_sock.bind(local_addr)
+            if kind == socket.SOCK_STREAM:
+                server_sock.listen()
+
+            sock.connect(server_sock.getsockname())
+
+        if request.param:
+            return sock.detach()
+        else:
+            request.addfinalizer(sock.close)
+            return sock
+
+    return factory
 
 
 _T = TypeVar("_T")
@@ -448,26 +514,40 @@ class TestTCPStream:
         with pytest.raises(ClosedResourceError):
             await stream.send(b"foo")
 
-    async def test_send_after_peer_closed(self, family: AnyIPAddressFamily) -> None:
-        def serve_once() -> None:
+    async def test_receive_after_peer_closed(
+        self, family: AnyIPAddressFamily, request: FixtureRequest
+    ) -> None:
+        server_sock = socket.create_server(("localhost", 0), family=family)
+        request.addfinalizer(server_sock.close)
+        server_sock.settimeout(1)
+        server_addr = server_sock.getsockname()[:2]
+
+        async with await connect_tcp(*server_addr) as stream:
             client_sock, _ = server_sock.accept()
             client_sock.close()
-            server_sock.close()
+            with pytest.raises(EndOfStream):
+                await stream.receive(1)
 
-        server_sock = socket.socket(family, socket.SOCK_STREAM)
+        with pytest.raises(ClosedResourceError):
+            await stream.receive(1)
+
+    async def test_send_after_peer_closed(
+        self, family: AnyIPAddressFamily, request: FixtureRequest
+    ) -> None:
+        server_sock = socket.create_server(("localhost", 0), family=family)
+        request.addfinalizer(server_sock.close)
         server_sock.settimeout(1)
-        server_sock.bind(("localhost", 0))
         server_addr = server_sock.getsockname()[:2]
-        server_sock.listen()
-        thread = Thread(target=serve_once, daemon=True)
-        thread.start()
 
-        with pytest.raises(BrokenResourceError):
-            async with await connect_tcp(*server_addr) as stream:
+        async with await connect_tcp(*server_addr) as stream:
+            client_sock, _ = server_sock.accept()
+            client_sock.close()
+            with pytest.raises(BrokenResourceError):
                 for _ in range(1000):
                     await stream.send(b"foo")
 
-        thread.join()
+        with pytest.raises(ClosedResourceError):
+            await stream.send(b"foo")
 
     async def test_connect_tcp_with_tls(
         self,
@@ -567,6 +647,48 @@ class TestTCPStream:
             )
             assert not caplog_text
 
+    async def test_from_socket(
+        self, family: AnyIPAddressFamily, sock_or_fd_factory: SockFdFactoryProtocol
+    ) -> None:
+        sock_or_fd = sock_or_fd_factory(family, socket.SOCK_STREAM, connected=True)
+        async with await SocketStream.from_socket(sock_or_fd) as stream:
+            assert isinstance(stream, SocketStream)
+            assert stream.extra(SocketAttribute.family) == family
+
+    async def test_from_socket_not_a_socket(self) -> None:
+        with pytest.raises(
+            TypeError,
+            match="expected an int or socket, got str instead",
+        ):
+            await SocketStream.from_socket("foo")  # type: ignore[arg-type]
+
+    async def test_from_socket_pass_file_fd(self, tmp_path: Path) -> None:
+        with pytest.raises(
+            ValueError,
+            match="the file descriptor does not refer to a socket",
+        ):
+            with tmp_path.joinpath("foo").open("wb") as fd:
+                await SocketStream.from_socket(fd.fileno())
+
+    async def test_from_socket_wrong_socket_type(
+        self, sock_or_fd_factory: SockFdFactoryProtocol
+    ) -> None:
+        sock_or_fd = sock_or_fd_factory(
+            socket.AF_INET, socket.SocketKind.SOCK_DGRAM, connected=True
+        )
+        with pytest.raises(
+            ValueError,
+            match="socket type mismatch: expected SOCK_STREAM, got SOCK_DGRAM",
+        ):
+            await SocketStream.from_socket(sock_or_fd)
+
+    async def test_from_socket_not_connected(
+        self, sock_or_fd_factory: SockFdFactoryProtocol
+    ) -> None:
+        sock_or_fd = sock_or_fd_factory(socket.AF_INET, socket.SOCK_STREAM, bound=True)
+        with pytest.raises(ValueError, match="the socket must be connected"):
+            await SocketStream.from_socket(sock_or_fd)
+
 
 @pytest.mark.network
 class TestTCPListener:
@@ -612,7 +734,20 @@ class TestTCPListener:
             for listener in multi.listeners:
                 client = socket.socket(listener.extra(SocketAttribute.family))
                 client.settimeout(1)
-                client.connect(listener.extra(SocketAttribute.local_address))
+                addr = listener.extra(SocketAttribute.local_address)
+                host, port = addr[0], addr[1]
+
+                # On Windows, connecting to ANY (:: or 0.0.0.0) is invalid (WinError 10049).
+                # Replace it with loopback (::1 or 127.0.0.1) to make the test portable.
+                if sys.platform == "win32" and host in ("::", "0.0.0.0"):
+                    family = listener.extra(SocketAttribute.family)
+                    if family == socket.AF_INET6:
+                        addr = ("::1", port)
+                    elif family == socket.AF_INET:
+                        addr = ("127.0.0.1", port)
+
+                client.connect(addr)
+
                 assert isinstance(listener, SocketListener)
                 stream = await listener.accept()
                 client.sendall(b"blah")
@@ -781,6 +916,150 @@ class TestTCPListener:
 
         async with await create_tcp_listener(local_host=link_local_ipv6_address):
             pass
+
+    async def test_from_socket(
+        self, family: AnyIPAddressFamily, sock_or_fd_factory: SockFdFactoryProtocol
+    ) -> None:
+        sock_or_fd = sock_or_fd_factory(family, socket.SOCK_STREAM, bound=True)
+        async with await SocketListener.from_socket(sock_or_fd) as listener:
+            assert isinstance(listener, SocketListener)
+            assert listener.extra(SocketAttribute.family) == family
+
+    async def test_from_socket_not_bound(
+        self, family: AnyIPAddressFamily, sock_or_fd_factory: SockFdFactoryProtocol
+    ) -> None:
+        sock_or_fd = sock_or_fd_factory(family, socket.SOCK_STREAM)
+        with pytest.raises(ValueError, match="the socket must be bound"):
+            await SocketListener.from_socket(sock_or_fd)
+
+    @pytest.mark.parametrize(
+        "local_host,family,expected_listeners,local_port",
+        [
+            (None, AddressFamily.AF_UNSPEC, 1 if socket.has_dualstack_ipv6() else 2, 0),
+            ("localhost", AddressFamily.AF_UNSPEC, 2, 0),
+            ("localhost", AddressFamily.AF_INET, 1, 0),
+            ("::", AddressFamily.AF_UNSPEC, 1, 0),
+            ("127.0.0.1", AddressFamily.AF_INET, 1, 0),
+            ("::1", AddressFamily.AF_INET6, 1, 0),
+            (
+                None,
+                AddressFamily.AF_UNSPEC,
+                1 if socket.has_dualstack_ipv6() else 2,
+                54321,
+            ),
+            ("localhost", AddressFamily.AF_UNSPEC, 2, 54321),
+            ("localhost", AddressFamily.AF_INET, 1, 54321),
+        ],
+    )
+    async def test_tcp_listener_same_port(
+        self,
+        local_host: str | None,
+        family: AnyIPAddressFamily,
+        expected_listeners: int,
+        local_port: int,
+    ) -> None:
+        async with await create_tcp_listener(
+            local_host=local_host, family=family, local_port=local_port
+        ) as multi:
+            ports = {
+                listener.extra(SocketAttribute.local_port)
+                for listener in multi.listeners
+            }
+            assert len(ports) == 1
+            if local_port != 0:
+                assert ports == {local_port}
+
+            assert len(multi.listeners) == expected_listeners
+
+    @skip_ipv6_mark
+    async def test_tcp_listener_dualstack_disabled(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(socket, "has_dualstack_ipv6", lambda: False)
+
+        async with await create_tcp_listener(
+            local_host=None, family=AddressFamily.AF_UNSPEC
+        ) as multi:
+            families = {
+                listener.extra(SocketAttribute.family) for listener in multi.listeners
+            }
+            assert families == {socket.AF_INET, socket.AF_INET6}
+            assert len(multi.listeners) == 2
+
+            ports = {
+                listener.extra(SocketAttribute.local_port)
+                for listener in multi.listeners
+            }
+            assert len(ports) == 1
+
+    async def test_tcp_listener_retry_after_partial_failure(self) -> None:
+        """
+        Simulate a case where the first bind() succeeds with an ephemeral port,
+        the second bind() fails with EADDRINUSE, and verify that create_tcp_listener
+        retries and eventually succeeds with all listeners bound to the same port.
+        """
+
+        real_bind = socket.socket.bind
+        bind_count = 0
+        fail_once = True
+
+        def fake_bind(
+            self: socket.socket, addr: tuple[str, int] | tuple[str, int, int, int]
+        ) -> None:
+            nonlocal bind_count, fail_once
+            port = addr[1] if isinstance(addr, tuple) and len(addr) >= 2 else None
+            bind_count += 1
+
+            if bind_count == 1 and port == 0:
+                return real_bind(self, addr)
+
+            if fail_once and port != 0:
+                fail_once = False
+                raise OSError(errno.EADDRINUSE, "simulated collision on second bind")
+
+            return real_bind(self, addr)
+
+        with patch.object(socket.socket, "bind", new=fake_bind):
+            async with await create_tcp_listener(
+                local_host="localhost", family=socket.AF_UNSPEC, local_port=0
+            ) as multi:
+                assert bind_count >= 2
+
+                ports = {
+                    listener.extra(SocketAttribute.local_port)
+                    for listener in multi.listeners
+                }
+                assert len(ports) == 1
+                assert all(
+                    isinstance(listener, SocketListener) for listener in multi.listeners
+                )
+
+    async def test_tcp_listener_total_bind_failure(self) -> None:
+        """
+        Test for a situation where bind() always fails when other listeners are being
+        bound to the same port as the first listener which was randomly assigned a free
+        port by the kernel.
+        """
+
+        def raise_oserror(addr: tuple[str, int]) -> None:
+            # Pretend that every explicitly requested port is already in use
+            if addr[1] != 0:
+                raise OSError(errno.EADDRINUSE, "bind failure")
+
+        mock_socket_instance = MagicMock()
+        mock_socket_instance.bind.side_effect = raise_oserror
+        asynclib = get_async_backend()
+        with (
+            patch("anyio._core._sockets.socket") as mock_anyio_sockets,
+            patch.object(
+                asynclib, "create_tcp_listener", return_value=MagicMock(SocketListener)
+            ),
+            pytest.raises(
+                OSError, match="Could not create 2 listeners with a consistent port"
+            ),
+        ):
+            mock_anyio_sockets.socket.configure_mock(return_value=mock_socket_instance)
+            await create_tcp_listener(local_host="localhost")
 
 
 @pytest.mark.skipif(
@@ -1121,6 +1400,46 @@ class TestUNIXStream:
             async with await connect_unix(actual_path):
                 pass
 
+    async def test_from_socket(
+        self, socket_path: Path, sock_or_fd_factory: SockFdFactoryProtocol
+    ) -> None:
+        sock_or_fd = sock_or_fd_factory(
+            socket.AF_UNIX, socket.SOCK_STREAM, connected=True
+        )
+        async with await UNIXSocketStream.from_socket(sock_or_fd) as stream:
+            assert isinstance(stream, UNIXSocketStream)
+
+    async def test_from_socket_wrong_socket_type(
+        self, sock_or_fd_factory: SockFdFactoryProtocol
+    ) -> None:
+        sock_or_fd = sock_or_fd_factory(
+            socket.AF_UNIX, socket.SOCK_DGRAM, connected=True
+        )
+        with pytest.raises(
+            ValueError,
+            match="socket type mismatch: expected SOCK_STREAM, got SOCK_DGRAM",
+        ):
+            await UNIXSocketStream.from_socket(sock_or_fd)
+
+    async def test_from_socket_wrong_address_family(
+        self, sock_or_fd_factory: SockFdFactoryProtocol
+    ) -> None:
+        sock_or_fd = sock_or_fd_factory(
+            socket.AF_INET, socket.SOCK_STREAM, connected=True
+        )
+        with pytest.raises(
+            ValueError,
+            match="address family mismatch: expected AF_UNIX, got AF_INET",
+        ):
+            await UNIXSocketStream.from_socket(sock_or_fd)
+
+    async def test_from_socket_not_connected(
+        self, sock_or_fd_factory: SockFdFactoryProtocol
+    ) -> None:
+        sock_or_fd = sock_or_fd_factory(socket.AF_UNIX, socket.SOCK_STREAM)
+        with pytest.raises(ValueError, match="the socket must be connected"):
+            await UNIXSocketStream.from_socket(sock_or_fd)
+
 
 @pytest.mark.skipif(
     sys.platform == "win32", reason="UNIX sockets are not available on Windows"
@@ -1181,7 +1500,7 @@ class TestUNIXListener:
     async def test_socket_options(self, socket_path: Path) -> None:
         async with await create_unix_listener(socket_path) as listener:
             listener_socket = listener.extra(SocketAttribute.raw_socket)
-            assert listener_socket.family == socket.AddressFamily.AF_UNIX
+            assert listener_socket.family == socket.AF_UNIX
             listener_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 80000)
             assert listener_socket.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF) in (
                 80000,
@@ -1244,6 +1563,12 @@ class TestUNIXListener:
         async with await create_unix_listener(real_path):
             pass
 
+    async def test_from_socket(self, sock_or_fd_factory: SockFdFactoryProtocol) -> None:
+        sock_or_fd = sock_or_fd_factory(socket.AF_UNIX, socket.SOCK_STREAM, bound=True)
+        async with await SocketListener.from_socket(sock_or_fd) as listener:
+            assert isinstance(listener, SocketListener)
+            assert listener.extra(SocketAttribute.family) == socket.AF_UNIX
+
 
 async def test_multi_listener(tmp_path_factory: TempPathFactory) -> None:
     async def handle(stream: SocketStream) -> None:
@@ -1266,14 +1591,19 @@ async def test_multi_listener(tmp_path_factory: TempPathFactory) -> None:
                     local_address = listener.extra(SocketAttribute.local_address)
                     if (
                         sys.platform != "win32"
-                        and listener.extra(SocketAttribute.family)
-                        == socket.AddressFamily.AF_UNIX
+                        and listener.extra(SocketAttribute.family) == socket.AF_UNIX
                     ):
                         assert isinstance(local_address, str)
                         stream: SocketStream = await connect_unix(local_address)
                     else:
                         assert isinstance(local_address, tuple)
-                        stream = await connect_tcp(*local_address)
+                        host, port = local_address
+                        host = (
+                            "::1"
+                            if listener.extra(SocketAttribute.family) == socket.AF_INET6
+                            else "127.0.0.1"
+                        )
+                        stream = await connect_tcp(host, port)
 
                     expected_addresses.append(
                         stream.extra(SocketAttribute.local_address)
@@ -1411,6 +1741,26 @@ class TestUDPSocket:
             )
             assert local_address[1] > 0
 
+    async def test_from_socket(
+        self, family: AnyIPAddressFamily, sock_or_fd_factory: SockFdFactoryProtocol
+    ) -> None:
+        sock_or_fd = sock_or_fd_factory(family, socket.SOCK_DGRAM, bound=True)
+        async with await UDPSocket.from_socket(sock_or_fd) as udp_socket:
+            assert isinstance(udp_socket, UDPSocket)
+            assert udp_socket.extra(SocketAttribute.family) == family
+
+    async def test_from_socket_wrong_socket_type(
+        self, sock_or_fd_factory: SockFdFactoryProtocol
+    ) -> None:
+        sock_or_fd = sock_or_fd_factory(
+            socket.AF_INET, socket.SOCK_STREAM, connected=True
+        )
+        with pytest.raises(
+            ValueError,
+            match="socket type mismatch: expected SOCK_DGRAM, got SOCK_STREAM",
+        ):
+            await UDPSocket.from_socket(sock_or_fd)
+
 
 @pytest.mark.network
 @pytest.mark.usefixtures("check_asyncio_bug")
@@ -1533,6 +1883,33 @@ class TestConnectedUDPSocket:
         await udp.aclose()
         with pytest.raises(ClosedResourceError):
             await udp.send(b"foo")
+
+    async def test_from_socket(
+        self, family: AnyIPAddressFamily, sock_or_fd_factory: SockFdFactoryProtocol
+    ) -> None:
+        sock_or_fd = sock_or_fd_factory(family, socket.SOCK_DGRAM, connected=True)
+        async with await ConnectedUDPSocket.from_socket(sock_or_fd) as udp_socket:
+            assert isinstance(udp_socket, ConnectedUDPSocket)
+            assert udp_socket.extra(SocketAttribute.family) == family
+
+    async def test_from_socket_wrong_socket_type(
+        self, sock_or_fd_factory: SockFdFactoryProtocol
+    ) -> None:
+        sock_or_fd = sock_or_fd_factory(
+            socket.AF_INET, socket.SOCK_STREAM, connected=True
+        )
+        with pytest.raises(
+            ValueError,
+            match="socket type mismatch: expected SOCK_DGRAM, got SOCK_STREAM",
+        ):
+            await ConnectedUDPSocket.from_socket(sock_or_fd)
+
+    async def test_from_socket_not_connected(
+        self, sock_or_fd_factory: SockFdFactoryProtocol
+    ) -> None:
+        sock_or_fd = sock_or_fd_factory(socket.AF_INET, socket.SOCK_DGRAM, bound=True)
+        with pytest.raises(ValueError, match="the socket must be connected"):
+            await ConnectedUDPSocket.from_socket(sock_or_fd)
 
 
 @pytest.mark.skipif(
@@ -1675,6 +2052,22 @@ class TestUNIXDatagramSocket:
         real_path = str(socket_path).encode() + b"\xf0"
         async with await create_unix_datagram_socket(local_path=real_path):
             pass
+
+    async def test_from_socket(self, sock_or_fd_factory: SockFdFactoryProtocol) -> None:
+        sock_or_fd = sock_or_fd_factory(socket.AF_UNIX, socket.SOCK_DGRAM)
+        async with await UNIXDatagramSocket.from_socket(sock_or_fd) as udp_socket:
+            assert isinstance(udp_socket, UNIXDatagramSocket)
+            assert udp_socket.extra(SocketAttribute.family) == socket.AF_UNIX
+
+    async def test_from_socket_wrong_socket_type(
+        self, sock_or_fd_factory: SockFdFactoryProtocol
+    ) -> None:
+        sock_or_fd = sock_or_fd_factory(socket.AF_UNIX, socket.SOCK_STREAM)
+        with pytest.raises(
+            ValueError,
+            match="socket type mismatch: expected SOCK_DGRAM, got SOCK_STREAM",
+        ):
+            await UNIXDatagramSocket.from_socket(sock_or_fd)
 
 
 @pytest.mark.skipif(
@@ -1850,6 +2243,111 @@ class TestConnectedUNIXDatagramSocket:
         with pytest.raises(ClosedResourceError):
             await udp.send(b"foo")
 
+    async def test_from_socket(self, sock_or_fd_factory: SockFdFactoryProtocol) -> None:
+        sock_or_fd = sock_or_fd_factory(
+            socket.AF_UNIX, socket.SOCK_DGRAM, connected=True
+        )
+        async with await ConnectedUNIXDatagramSocket.from_socket(
+            sock_or_fd
+        ) as udp_socket:
+            assert isinstance(udp_socket, ConnectedUNIXDatagramSocket)
+            assert udp_socket.extra(SocketAttribute.family) == socket.AF_UNIX
+
+    async def test_from_socket_wrong_socket_type(
+        self, socket_path: Path, sock_or_fd_factory: SockFdFactoryProtocol
+    ) -> None:
+        sock_or_fd = sock_or_fd_factory(
+            socket.AF_UNIX, socket.SOCK_STREAM, connected=True
+        )
+        with pytest.raises(
+            ValueError,
+            match="socket type mismatch: expected SOCK_DGRAM, got SOCK_STREAM",
+        ):
+            await ConnectedUNIXDatagramSocket.from_socket(sock_or_fd)
+
+    async def test_from_socket_not_connected(
+        self, sock_or_fd_factory: SockFdFactoryProtocol
+    ) -> None:
+        sock_or_fd = sock_or_fd_factory(socket.AF_UNIX, socket.SOCK_DGRAM, bound=True)
+        with pytest.raises(ValueError, match="the socket must be connected"):
+            await ConnectedUNIXDatagramSocket.from_socket(sock_or_fd)
+
+
+async def test_tcp_connectable(mocker: MockerFixture) -> None:
+    mock_connect_tcp = mocker.patch("anyio._core._sockets.connect_tcp")
+    connectable = TCPConnectable("localhost", 1234)
+    await connectable.connect()
+    mock_connect_tcp.assert_called_once_with("localhost", 1234)
+
+
+async def test_unix_connectable(mocker: MockerFixture) -> None:
+    mock_connect_tcp = mocker.patch("anyio._core._sockets.connect_unix")
+    connectable = UNIXConnectable("/foo/bar")
+    await connectable.connect()
+    mock_connect_tcp.assert_called_once_with("/foo/bar")
+
+
+class TestAsConnectable:
+    def test_pass_connectable(self) -> None:
+        connectable = TCPConnectable("localhost", 1234)
+        assert as_connectable(connectable) is connectable
+
+    @pytest.mark.parametrize(
+        "addr",
+        [
+            pytest.param("localhost", id="string"),
+            pytest.param(IPv4Address("127.0.0.1"), id="ipv4addr"),
+            pytest.param(IPv6Address("::1"), id="ipv6addr"),
+        ],
+    )
+    def test_tcp(self, addr: str | IPv4Address | IPv6Address) -> None:
+        connectable = as_connectable((addr, 1234))
+        assert isinstance(connectable, TCPConnectable)
+        assert connectable.host == addr
+        assert connectable.port == 1234
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            pytest.param("/foo/bar", id="str"),
+            pytest.param(b"/foo/bar", id="bytes"),
+            pytest.param(Path("/foo/bar"), id="strpath"),
+        ],
+    )
+    def test_unix(self, path: str | bytes | os.PathLike[str]) -> None:
+        connectable = as_connectable(path)
+        assert isinstance(connectable, UNIXConnectable)
+        assert connectable.path == path
+
+    def test_bad_type(self) -> None:
+        with pytest.raises(TypeError, match="cannot convert 1234 to a connectable"):
+            as_connectable(1234)  # type: ignore[arg-type]
+
+    def test_tls_true(self) -> None:
+        connectable = as_connectable(
+            "/foo/bar",
+            tls=True,
+            tls_hostname="example.com",
+            tls_standard_compatible=False,
+        )
+        assert isinstance(connectable, TLSConnectable)
+        assert connectable.hostname == "example.com"
+        assert not connectable.standard_compatible
+        assert isinstance(connectable, TLSConnectable)
+
+    def test_tls_explicit_context(self, client_context: SSLContext) -> None:
+        connectable = as_connectable(
+            "/foo/bar", tls=True, ssl_context=client_context, tls_hostname="example.com"
+        )
+        assert isinstance(connectable, TLSConnectable)
+        assert connectable.ssl_context is client_context
+        assert connectable.hostname == "example.com"
+
+    def test_tls_tcp_implicit_hostname(self, client_context: SSLContext) -> None:
+        connectable = as_connectable(("localhost", 1234), tls=True)
+        assert isinstance(connectable, TLSConnectable)
+        assert connectable.hostname == "localhost"
+
 
 @pytest.mark.network
 async def test_getaddrinfo() -> None:
@@ -1859,9 +2357,7 @@ async def test_getaddrinfo() -> None:
     assert correct != wrong
 
 
-@pytest.mark.parametrize(
-    "sock_type", [socket.SOCK_STREAM, socket.SocketKind.SOCK_STREAM]
-)
+@pytest.mark.parametrize("sock_type", [socket.SOCK_STREAM, socket.SOCK_STREAM])
 async def test_getaddrinfo_ipv6addr(
     sock_type: Literal[socket.SocketKind.SOCK_STREAM],
 ) -> None:
@@ -1869,8 +2365,8 @@ async def test_getaddrinfo_ipv6addr(
     proto = 0 if platform.system() == "Windows" else 6
     assert await getaddrinfo("::1", 0, type=sock_type) == [
         (
-            socket.AddressFamily.AF_INET6,
-            socket.SocketKind.SOCK_STREAM,
+            socket.AF_INET6,
+            socket.SOCK_STREAM,
             proto,
             "",
             ("::1", 0),
@@ -1879,9 +2375,7 @@ async def test_getaddrinfo_ipv6addr(
 
 
 async def test_getaddrinfo_ipv6_disabled() -> None:
-    gai_result = [
-        (AddressFamily.AF_INET6, socket.SocketKind.SOCK_STREAM, 6, "", (1, b""))
-    ]
+    gai_result = [(AddressFamily.AF_INET6, socket.SOCK_STREAM, 6, "", (1, b""))]
     with mock.patch.object(get_async_backend(), "getaddrinfo", return_value=gai_result):
         assert await getaddrinfo("::1", 0) == []
 
