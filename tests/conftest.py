@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import platform
 import ssl
 import sys
 from collections.abc import Generator, Iterator
@@ -13,21 +14,31 @@ import trustme
 from _pytest.fixtures import SubRequest
 from trustme import CA
 
+from anyio import get_all_backends, get_available_backends
+from anyio._core._eventloop import current_async_library
+
 if TYPE_CHECKING:
     from blockbuster import BlockBuster
 
 uvloop_marks = []
+uvloop_name = "uvloop"
 try:
-    import uvloop
+    if platform.system() == "Windows":
+        uvloop_name = "winloop"
+        import winloop as uvloop
+    else:
+        import uvloop
 except ImportError:
-    uvloop_marks.append(pytest.mark.skip(reason="uvloop not available"))
+    uvloop_marks.append(pytest.mark.skip(reason=f"{uvloop_name} not available"))
     uvloop = Mock()
 else:
     if hasattr(asyncio.AbstractEventLoop, "shutdown_default_executor") and not hasattr(
         uvloop.loop.Loop, "shutdown_default_executor"
     ):
         uvloop_marks.append(
-            pytest.mark.skip(reason="uvloop is missing shutdown_default_executor()")
+            pytest.mark.skip(
+                reason=f"{uvloop_name} is missing shutdown_default_executor()"
+            )
         )
 
 pytest_plugins = ["pytester"]
@@ -35,9 +46,12 @@ pytest_plugins = ["pytester"]
 asyncio_params = [
     pytest.param(("asyncio", {"debug": True}), id="asyncio"),
     pytest.param(
-        ("asyncio", {"debug": True, "loop_factory": uvloop.new_event_loop}),
+        (
+            "asyncio",
+            {"debug": True, "loop_factory": uvloop.new_event_loop},
+        ),
         marks=uvloop_marks,
-        id="asyncio+uvloop",
+        id=f"asyncio+{uvloop_name}",
     ),
 ]
 if sys.version_info >= (3, 12):
@@ -52,6 +66,24 @@ if sys.version_info >= (3, 12):
             ("asyncio", {"debug": True, "loop_factory": eager_task_loop_factory}),
             id="asyncio+eager",
         ),
+    )
+
+backend_params = asyncio_params.copy()
+available_backends = set(get_available_backends())
+for backend_name in get_all_backends():
+    if backend_name == "asyncio":
+        continue
+
+    backend_params.append(
+        pytest.param(
+            backend_name,
+            marks=[
+                pytest.mark.skipif(
+                    backend_name not in available_backends,
+                    reason=f"{backend_name} is not available",
+                )
+            ],
+        )
     )
 
 
@@ -83,7 +115,7 @@ def deactivate_blockbuster(blockbuster: BlockBuster | None) -> None:
         blockbuster.deactivate()
 
 
-@pytest.fixture(params=[*asyncio_params, pytest.param("trio")])
+@pytest.fixture(params=backend_params)
 def anyio_backend(request: SubRequest) -> tuple[str, dict[str, Any]]:
     return request.param
 
@@ -144,3 +176,11 @@ else:
 
     def no_other_refs() -> list[object]:
         return [sys._getframe(1)]
+
+
+@pytest.fixture
+async def event_loop_implementation_name() -> str | None:
+    if (name := current_async_library()) == "asyncio":
+        return asyncio.get_running_loop().__module__
+
+    return name

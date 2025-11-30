@@ -29,7 +29,6 @@ requires-python = ">= 3.9"
 dependencies = [
     "exceptiongroup >= 1.0.2; python_version < '3.11'",
     "idna >= 2.8",
-    "sniffio >= 1.1",
     "typing_extensions >= 4.5; python_version < '3.13'",
 ]
 dynamic = ["version"]
@@ -41,33 +40,38 @@ Changelog = "https://anyio.readthedocs.io/en/stable/versionhistory.html"
 "Issue tracker" = "https://github.com/agronholm/anyio/issues"
 
 [project.optional-dependencies]
-trio = ["trio >= 0.31.0"]
+trio = [
+    "trio >= 0.32.0; python_version >= '3.10'",
+    "trio >= 0.31.0; python_version < '3.10'",
+]
 
 [project.entry-points]
 pytest11 = {anyio = "anyio.pytest_plugin"}
 
 [dependency-groups]
 test = [
-    "anyio[trio]",
     "blockbuster >= 1.5.23",
     "coverage[toml] >= 7",
     "exceptiongroup >= 1.2.0",
-    "hypothesis >= 4.0",
+    "hypothesis >= 4.18.2",
     "psutil >= 5.9",
     "pytest >= 7.0",
     "pytest-mock >= 3.14",
-    "trustme",
+    "trustme >= 1.0.0",
     "truststore >= 0.9.1; python_version >= '3.10'",
     """\
-    uvloop >= 0.21; platform_python_implementation == 'CPython' \
+    uvloop >= 0.22.1; platform_python_implementation == 'CPython' \
     and platform_system != 'Windows' \
-    and python_version < '3.14'\
+    """,
+    """
+    winloop >= 0.2.3; platform_python_implementation == 'CPython' \
+    and platform_system == 'Windows' \
     """
 ]
 doc = [
-    "packaging",
+    "packaging >= 14.1",
     "Sphinx ~= 8.2",
-    "sphinx_rtd_theme",
+    "sphinx_rtd_theme >= 2.0.0",
     "sphinx-autodoc-typehints >= 1.2.0",
     "sphinx-tabs >= 3.3.1",
 ]
@@ -103,7 +107,7 @@ ignore = ["B009", "PERF203"]
 "tests/test_tempfile.py" = ["ASYNC230"]
 
 [tool.mypy]
-python_version = "3.13"
+python_version = "3.14"
 strict = true
 disallow_any_generics = false
 warn_return_any = false
@@ -140,7 +144,7 @@ exclude_also = [
 ]
 
 [tool.tox]
-env_list = ["pre-commit", "py39", "py310", "py311", "py312", "py313", "py314", "pypy3"]
+env_list = ["pre-commit", "py39", "py310", "py311", "py312", "py313", "py314", "pypy3", "only_asyncio"]
 skip_missing_interpreters = true
 requires = ["tox >= 4.22"]
 
@@ -149,10 +153,14 @@ depends = ["pre-commit"]
 package = "editable"
 commands = [["coverage", "run", "-m", "pytest", { replace = "posargs", extend = true }]]
 dependency_groups = ["test"]
+extras = ["trio"]
 set_env = { PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1" }
 
 [tool.tox.env.pypy3]
 commands = [["pytest", { replace = "posargs", extend = true }]]
+
+[tool.tox.env.only_asyncio]
+extras = []
 
 [tool.tox.env.pre-commit]
 commands = [["pre-commit", "run", "--all-files"]]
