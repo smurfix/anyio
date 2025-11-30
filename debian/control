@@ -3,6 +3,7 @@ Maintainer: Matthias Urlichs <matthias@urlichs.de>
 Section: python
 Priority: optional
 Build-Depends: dh-python, python3-setuptools, python3-all, debhelper (>= 9),
+  pybuild-plugin-pyproject,
   python3-typing-extensions (>= 4.12),
   python3-setuptools-scm (>> 3),
   python3-idna (>= 2.8),
