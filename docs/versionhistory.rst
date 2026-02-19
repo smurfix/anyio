@@ -3,6 +3,18 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
+**UNRELEASED**
+
+- Dropped support for Python 3.9
+
+**4.12.1**
+
+- Changed all functions currently raising the private ``NoCurrentAsyncBackend``
+  exception (since v4.12.0) to instead raise the public ``NoEventLoopError`` exception
+  (`#1048 <https://github.com/agronholm/anyio/issues/1048>`_)
+- Fixed ``anyio.functools.lru_cache`` not working with instance methods
+  (`#1042 <https://github.com/agronholm/anyio/issues/1042>`_)
+
 **4.12.0**
 
 - Added support for asyncio's `task call graphs`_ on Python 3.14 and later when using

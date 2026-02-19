@@ -53,7 +53,7 @@ from typing import (
     IO,
     TYPE_CHECKING,
     Any,
-    Optional,
+    ParamSpec,
     TypeVar,
     cast,
 )
@@ -108,11 +108,6 @@ if TYPE_CHECKING:
     from _typeshed import FileDescriptorLike
 else:
     FileDescriptorLike = object
-
-if sys.version_info >= (3, 10):
-    from typing import ParamSpec
-else:
-    from typing_extensions import ParamSpec
 
 if sys.version_info >= (3, 11):
     from asyncio import Runner
@@ -928,7 +923,7 @@ class TaskGroup(abc.TaskGroup):
 # Threads
 #
 
-_Retval_Queue_Type = tuple[Optional[T_Retval], Optional[BaseException]]
+_Retval_Queue_Type = tuple[T_Retval | None, BaseException | None]
 
 
 class WorkerThread(Thread):
@@ -1013,29 +1008,6 @@ _threadpool_idle_workers: RunVar[deque[WorkerThread]] = RunVar(
     "_threadpool_idle_workers"
 )
 _threadpool_workers: RunVar[set[WorkerThread]] = RunVar("_threadpool_workers")
-
-
-class BlockingPortal(abc.BlockingPortal):
-    def __new__(cls) -> BlockingPortal:
-        return object.__new__(cls)
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._loop = get_running_loop()
-
-    def _spawn_task_from_thread(
-        self,
-        func: Callable[[Unpack[PosArgsT]], Awaitable[T_Retval] | T_Retval],
-        args: tuple[Unpack[PosArgsT]],
-        kwargs: dict[str, Any],
-        name: object,
-        future: Future[T_Retval],
-    ) -> None:
-        AsyncIOBackend.run_sync_from_thread(
-            partial(self._task_group.start_soon, name=name),
-            (self._call_func, func, args, kwargs, future),
-            self._loop,
-        )
 
 
 #
@@ -2597,10 +2569,6 @@ class AsyncIOBackend(AsyncBackend):
         f: concurrent.futures.Future[T_Retval] = Future()
         loop.call_soon_threadsafe(wrapper)
         return f.result()
-
-    @classmethod
-    def create_blocking_portal(cls) -> abc.BlockingPortal:
-        return BlockingPortal()
 
     @classmethod
     async def open_process(
