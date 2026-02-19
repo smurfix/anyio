@@ -245,7 +245,9 @@ async def connect_tcp(
                 if len(oserrors) == 1
                 else ExceptionGroup("multiple connection attempts failed", oserrors)
             )
-            raise OSError("All connection attempts failed") from cause
+            raise OSError(
+                f"All connection attempts to {remote_host}:{remote_port} failed"
+            ) from cause
     finally:
         oserrors.clear()
 
