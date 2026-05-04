@@ -476,6 +476,39 @@ def test_keyboardinterrupt_during_test(
     testdir.runpytest_subprocess(*pytest_args, timeout=3)
 
 
+def test_keyboard_interrupt_does_not_resume_test(testdir: Pytester) -> None:
+    # Regression test for #1060
+    testdir.makepyfile(
+        """
+        import asyncio
+        import signal
+
+        import anyio
+        import pytest
+
+        @pytest.fixture
+        def anyio_backend():
+            return "asyncio"
+
+        @pytest.fixture
+        async def myfixture():
+            yield
+
+        @pytest.mark.anyio
+        async def test_keyboard_interrupt(myfixture):
+            loop = asyncio.get_running_loop()
+            loop.call_soon(signal.raise_signal, signal.SIGINT)
+            await anyio.sleep(3600)
+            print("RESUMED_AFTER_INTERRUPT")
+        """
+    )
+
+    result = testdir.runpytest_subprocess(*pytest_args, timeout=5)
+    assert result.ret == 2
+    result.stdout.no_fnmatch_line("*RESUMED_AFTER_INTERRUPT*")
+    result.stdout.fnmatch_lines(["*KeyboardInterrupt*"])
+
+
 def test_async_fixture_in_test_class(testdir: Pytester) -> None:
     # Regression test for #633
     testdir.makepyfile(
@@ -676,3 +709,52 @@ class TestFreePortFactory:
         for family, addr in families:
             with socket.socket(family, socket.SOCK_DGRAM) as sock:
                 sock.bind((addr, free_udp_port))
+
+
+def test_programmatic_anyio_mark(testdir: Pytester) -> None:
+    """Test that the anyio marker added programmatically via pytest_collection_modifyitems
+    causes the test to be run (regression test for issue #422)."""
+    testdir.makeconftest(
+        """
+        import inspect
+        import pytest
+
+
+        def pytest_collection_modifyitems(session, config, items):
+            for item in items:
+                if (
+                    isinstance(item, pytest.Function)
+                    and inspect.iscoroutinefunction(item.function)
+                ):
+                    item.add_marker(pytest.mark.anyio)
+        """
+    )
+    testdir.makepyfile(
+        """
+        async def test_programmatically_marked():
+            pass
+        """
+    )
+
+    result = testdir.runpytest(*pytest_args)
+    result.assert_outcomes(passed=len(get_available_backends()))
+
+
+def test_func_as_parametrize_param_name(testdir: Pytester) -> None:
+    """
+    Test that "func" can be used as a parameter name in
+    `pytest.mark.parametrize` when using the pytest plugin.
+    """
+    testdir.makepyfile(
+        """
+        import pytest
+
+        @pytest.mark.parametrize("func", [1])
+        @pytest.mark.anyio
+        async def test_func_as_parametrize_param_name(func: int) -> None:
+            pass
+        """
+    )
+
+    result = testdir.runpytest(*pytest_args)
+    result.assert_outcomes(passed=len(get_available_backends()))

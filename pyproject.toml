@@ -48,11 +48,11 @@ pytest11 = {anyio = "anyio.pytest_plugin"}
 test = [
     "blockbuster >= 1.5.23",
     "coverage[toml] >= 7",
-    "exceptiongroup >= 1.2.0",
     "hypothesis >= 4.18.2",
     "psutil >= 5.9",
-    "pytest >= 7.0",
+    "pytest >= 8.4",
     "pytest-mock >= 3.14",
+    "pytest-timeout >= 2.4.0",
     "trustme >= 1.0.0",
     "truststore >= 0.9.1",
     """\
@@ -101,18 +101,23 @@ ignore = ["B009", "PERF203"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/test_tempfile.py" = ["ASYNC230"]
+"tests/*.py" = ["ASYNC240"]
 
 [tool.mypy]
 python_version = "3.14"
 strict = true
 disallow_any_generics = false
 warn_return_any = false
-disallow_untyped_decorators = false
+files = ["src", "tests"]
 
 [tool.pytest.ini_options]
-addopts = "-rsfE --tb=short --strict-config --strict-markers -p anyio -p pytest_mock -p no:asyncio -p no:trio"
+addopts = """\
+  -rsfE --tb=short --strict-config --strict-markers -p anyio -p pytest_mock \
+  -p timeout -p no:asyncio -p no:trio \
+  """
 testpaths = ["tests"]
 anyio_mode = "auto"
+timeout = 20
 xfail_strict = true
 filterwarnings = [
     "error",

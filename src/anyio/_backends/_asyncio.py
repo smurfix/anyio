@@ -78,7 +78,6 @@ from .._core._exceptions import (
     EndOfStream,
     RunFinishedError,
     WouldBlock,
-    iterate_exceptions,
 )
 from .._core._sockets import convert_ipv6_sockaddr
 from .._core._streams import create_memory_object_stream
@@ -493,17 +492,39 @@ class CancelScope(BaseCancelScope):
                     self._pending_uncancellations -= 1
 
                 # Update cancelled_caught and check for exceptions we must not swallow
-                cannot_swallow_exc_val = False
-                if exc_val is not None:
-                    for exc in iterate_exceptions(exc_val):
-                        if isinstance(exc, CancelledError) and is_anyio_cancellation(
-                            exc
-                        ):
-                            self._cancelled_caught = True
-                        else:
-                            cannot_swallow_exc_val = True
+                if isinstance(exc_val, BaseExceptionGroup):
+                    cancelleds_caught, remaining = exc_val.split(
+                        lambda exc: (
+                            isinstance(exc, CancelledError)
+                            and is_anyio_cancellation(exc)
+                        )
+                    )
 
-                return self._cancelled_caught and not cannot_swallow_exc_val
+                    if cancelleds_caught is None:
+                        return False
+
+                    self._cancelled_caught = True
+
+                    if remaining is None:
+                        return True
+
+                    context = remaining.__context__
+                    try:
+                        # Preserve __cause__ and __suppress_context__ by avoiding `raise
+                        # ... from ...`
+                        raise remaining
+                    finally:
+                        # Preserve __context__
+                        remaining.__context__ = context
+                        del context
+                else:
+                    if isinstance(exc_val, CancelledError) and is_anyio_cancellation(
+                        exc_val
+                    ):
+                        self._cancelled_caught = True
+                        return True
+                    else:
+                        return False
             else:
                 if self._pending_uncancellations:
                     assert self._parent_scope is not None
@@ -717,14 +738,18 @@ else:
 class TaskGroup(abc.TaskGroup):
     def __init__(self) -> None:
         self.cancel_scope: CancelScope = CancelScope()
-        self._active = False
+        self._entered = False
         self._exceptions: list[BaseException] = []
         self._tasks: set[asyncio.Task] = set()
         self._on_completed_fut: asyncio.Future[None] | None = None
 
     async def __aenter__(self) -> TaskGroup:
+        if self._entered:
+            raise RuntimeError("TaskGroup cannot be entered more than once")
+
+        self._entered = True
+
         self.cancel_scope.__enter__()
-        self._active = True
         return self
 
     async def __aexit__(
@@ -769,7 +794,6 @@ class TaskGroup(abc.TaskGroup):
                     # anyway
                     await AsyncIOBackend.cancel_shielded_checkpoint()
 
-                self._active = False
                 if self._exceptions:
                     # The exception that got us here should already have been
                     # added to self._exceptions so it's ok to break exception
@@ -844,7 +868,7 @@ class TaskGroup(abc.TaskGroup):
                     RuntimeError("Child exited without calling task_status.started()")
                 )
 
-        if not self._active:
+        if not self._entered or not self.cancel_scope._active:
             raise RuntimeError(
                 "This task group is not active; no new tasks can be started."
             )
@@ -1134,7 +1158,7 @@ def _forcibly_shutdown_process_pool_on_exit(
 
     # Close as much as possible (w/o async/await) to avoid warnings
     for process in workers.copy():
-        if process.returncode is None:
+        if process.returncode is not None:
             continue
 
         process._stdin._stream._transport.close()  # type: ignore[union-attr]
@@ -1187,8 +1211,7 @@ class StreamProtocol(asyncio.Protocol):
 
     def connection_lost(self, exc: Exception | None) -> None:
         if exc:
-            self.exception = BrokenResourceError()
-            self.exception.__cause__ = exc
+            self.exception = exc
 
         self.read_event.set()
         self.write_event.set()
@@ -1272,7 +1295,7 @@ class SocketStream(abc.SocketStream):
                 if self._closed:
                     raise ClosedResourceError from None
                 elif self._protocol.exception:
-                    raise self._protocol.exception from None
+                    raise BrokenResourceError from self._protocol.exception
                 else:
                     raise EndOfStream from None
 
@@ -1295,7 +1318,7 @@ class SocketStream(abc.SocketStream):
             if self._closed:
                 raise ClosedResourceError
             elif self._protocol.exception is not None:
-                raise self._protocol.exception
+                raise BrokenResourceError from self._protocol.exception
 
             try:
                 self._transport.write(item)
@@ -2238,6 +2261,7 @@ class TestRunner(abc.TestRunner):
     async def _call_in_runner_task(
         self,
         func: Callable[P, Awaitable[T_Retval]],
+        /,
         *args: P.args,
         **kwargs: P.kwargs,
     ) -> T_Retval:
@@ -2297,7 +2321,20 @@ class TestRunner(abc.TestRunner):
             )
         except Exception as exc:
             self._exceptions.append(exc)
-
+        except BaseException:
+            # A BaseException (e.g. KeyboardInterrupt, SystemExit) interrupted the event loop before
+            # the test completed. Cancel _runner_task so it does not resume when the event
+            # loop is re-entered during async generator fixture teardown.
+            if self._runner_task is not None and not self._runner_task.done():
+                self._runner_task.cancel()
+                self._send_stream.close()
+                try:
+                    self.get_loop().run_until_complete(self._runner_task)
+                except CancelledError:
+                    pass
+                finally:
+                    self._runner_task = None
+            raise
         self._raise_async_exceptions()
 
 
@@ -2501,7 +2538,7 @@ class AsyncIOBackend(AsyncBackend):
         scope: CancelScope | None = threadlocals.current_cancel_scope
         while scope is not None:
             if scope.cancel_called:
-                raise CancelledError(f"Cancelled by cancel scope {id(scope):x}")
+                raise CancelledError(f"Cancelled via cancel scope {id(scope):x}")
 
             if scope.shield:
                 return

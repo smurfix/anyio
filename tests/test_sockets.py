@@ -8,6 +8,7 @@ import os
 import platform
 import re
 import socket
+import struct
 import sys
 import tempfile
 import threading
@@ -396,6 +397,19 @@ class TestTCPStream:
         server_sock.close()
         assert client_addr[0] == expected_client_addr
 
+    async def test_connect_tcp_with_local_port(
+        self,
+        server_sock: socket.socket,
+        server_addr: tuple[str, int],
+        family: AnyIPAddressFamily,
+        free_tcp_port: int,
+    ) -> None:
+        local_addr = "127.0.0.1" if family == AddressFamily.AF_INET else "::1"
+        async with await connect_tcp(
+            *server_addr, local_host=local_addr, local_port=free_tcp_port
+        ) as stream:
+            assert stream.extra(SocketAttribute.local_port) == free_tcp_port
+
     @pytest.mark.skipif(
         sys.implementation.name == "pypy",
         reason=(
@@ -552,6 +566,57 @@ class TestTCPStream:
 
         with pytest.raises(ClosedResourceError):
             await stream.send(b"foo")
+
+    async def test_receive_exception_cause_preserved(
+        self, family: AnyIPAddressFamily, request: FixtureRequest
+    ) -> None:
+        """
+        Test that when connection_lost is called with an exception, the resulting
+        BrokenResourceError has the original exception as its __cause__.
+
+        Regression test for https://github.com/agronholm/anyio/issues/1055.
+        """
+        server_sock = socket.create_server(("localhost", 0), family=family)
+        request.addfinalizer(server_sock.close)
+        server_sock.settimeout(1)
+        server_addr = server_sock.getsockname()[:2]
+
+        async with await connect_tcp(*server_addr) as stream:
+            client_sock, _ = server_sock.accept()
+            client_sock.setsockopt(
+                socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+            )
+            client_sock.close()
+            with pytest.raises(BrokenResourceError) as exc_info:
+                await stream.receive()
+
+            assert exc_info.value.__cause__ is not None
+
+    async def test_send_exception_cause_preserved(
+        self, family: AnyIPAddressFamily, request: FixtureRequest
+    ) -> None:
+        """
+        Test that when connection_lost is called with an exception, the resulting
+        BrokenResourceError from send() has the original exception as its __cause__.
+
+        Regression test for https://github.com/agronholm/anyio/issues/1055.
+        """
+        server_sock = socket.create_server(("localhost", 0), family=family)
+        request.addfinalizer(server_sock.close)
+        server_sock.settimeout(1)
+        server_addr = server_sock.getsockname()[:2]
+
+        async with await connect_tcp(*server_addr) as stream:
+            client_sock, _ = server_sock.accept()
+            client_sock.setsockopt(
+                socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+            )
+            client_sock.close()
+            with pytest.raises(BrokenResourceError) as exc_info:
+                for _ in range(1000):
+                    await stream.send(b"foo")
+
+            assert exc_info.value.__cause__ is not None
 
     async def test_connect_tcp_with_tls(
         self,
@@ -1645,7 +1710,9 @@ class TestUDPSocket:
         async with await create_udp_socket(
             local_host="localhost", family=family
         ) as sock:
-            host, port = sock.extra(SocketAttribute.local_address)  # type: ignore[misc]
+            host, port = cast(
+                tuple[str, int], sock.extra(SocketAttribute.local_address)
+            )
             await sock.sendto(b"blah", host, port)
             request, addr = await sock.receive()
             assert request == b"blah"
@@ -1664,8 +1731,8 @@ class TestUDPSocket:
         async with await create_udp_socket(
             family=family, local_host="localhost"
         ) as server:
-            host, port = server.extra(  # type: ignore[misc]
-                SocketAttribute.local_address
+            host, port = cast(
+                tuple[str, int], server.extra(SocketAttribute.local_address)
             )
             async with await create_udp_socket(
                 family=family, local_host="localhost"
@@ -1732,7 +1799,7 @@ class TestUDPSocket:
         udp = await create_udp_socket(
             family=AddressFamily.AF_INET, local_host="localhost"
         )
-        host, port = udp.extra(SocketAttribute.local_address)  # type: ignore[misc]
+        host, port = cast(tuple[str, int], udp.extra(SocketAttribute.local_address))
         await udp.aclose()
         with pytest.raises(ClosedResourceError):
             await udp.sendto(b"foo", host, port)
@@ -1789,12 +1856,14 @@ class TestConnectedUDPSocket:
         async with await create_udp_socket(
             family=family, local_host="localhost"
         ) as udp1:
-            host, port = udp1.extra(SocketAttribute.local_address)  # type: ignore[misc]
+            host, port = cast(
+                tuple[str, int], udp1.extra(SocketAttribute.local_address)
+            )
             async with await create_connected_udp_socket(
                 host, port, local_host="localhost", family=family
             ) as udp2:
-                host, port = udp2.extra(
-                    SocketAttribute.local_address  # type: ignore[misc]
+                host, port = cast(
+                    tuple[str, int], udp2.extra(SocketAttribute.local_address)
                 )
                 await udp2.send(b"blah")
                 request = await udp1.receive()
@@ -1812,10 +1881,12 @@ class TestConnectedUDPSocket:
         async with await create_udp_socket(
             family=family, local_host="localhost"
         ) as udp1:
-            host, port = udp1.extra(SocketAttribute.local_address)  # type: ignore[misc]
+            host, port = cast(
+                tuple[str, int], udp1.extra(SocketAttribute.local_address)
+            )
             async with await create_connected_udp_socket(host, port) as udp2:
-                host, port = udp2.extra(  # type: ignore[misc]
-                    SocketAttribute.local_address
+                host, port = cast(
+                    tuple[str, int], udp2.extra(SocketAttribute.local_address)
                 )
                 async with create_task_group() as tg:
                     tg.start_soon(serve)
@@ -2390,6 +2461,9 @@ async def test_getaddrinfo_ipv6_disabled() -> None:
 
 
 async def test_getnameinfo() -> None:
+    if os.getenv("GITHUB_ACTIONS") and platform.system() == "Darwin":
+        pytest.skip("macOS GitHub Actions runner has broken getnameinfo")
+
     expected_result = socket.getnameinfo(("127.0.0.1", 6666), 0)
     result = await getnameinfo(("127.0.0.1", 6666))
     assert result == expected_result

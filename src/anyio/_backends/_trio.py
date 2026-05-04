@@ -166,11 +166,16 @@ class CancelScope(BaseCancelScope):
 
 class TaskGroup(abc.TaskGroup):
     def __init__(self) -> None:
+        self._entered = False
         self._active = False
         self._nursery_manager = trio.open_nursery(strict_exception_groups=True)
         self.cancel_scope = None  # type: ignore[assignment]
 
     async def __aenter__(self) -> TaskGroup:
+        if self._entered:
+            raise RuntimeError("TaskGroup cannot be entered more than once")
+
+        self._entered = True
         self._active = True
         self._nursery = await self._nursery_manager.__aenter__()
         self.cancel_scope = CancelScope(self._nursery.cancel_scope)
@@ -883,6 +888,7 @@ class TestRunner(abc.TestRunner):
     def _call_in_runner_task(
         self,
         func: Callable[P, Awaitable[T_Retval]],
+        /,
         *args: P.args,
         **kwargs: P.kwargs,
     ) -> T_Retval:
