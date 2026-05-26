@@ -5,19 +5,27 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
 **UNRELEASED**
 
-- Added the ``local_port`` parameter to :func:`connect_tcp` to allow binding to a
+- Added an asynchronous implementation of the ``itertools`` module
+  (`#998 <https://github.com/agronholm/anyio/issues/998>`_; PR by @11kkw)
+- Added the ``local_port`` parameter to ``connect_tcp()`` to allow binding to a
   specific local port before connecting
   (`#1067 <https://github.com/agronholm/anyio/issues/1067>`_; PR by @nullwiz)
 - Added support for custom capacity limiters in async path and file I/O
   functions and classes
 - Added the ``create_task()`` task group method for easier asyncio migration
   and to allow retrieving task return values more easily
+- Added the ``cancel()`` convenience method to ``TaskGroup`` as a shortcut for
+  cancelling the task group's cancel scope
 - Improved the error message when a known backend is not installed to suggest the
   install command
   (`#1115 <https://github.com/agronholm/anyio/pull/1115>`_; PR by @EmmanuelNiyonshuti)
 - Improved ``anyio.Path`` to preserve subclass types by returning ``Self`` in methods
   that return path objects
   (`#1130 <https://github.com/agronholm/anyio/issues/1130>`_; PR by @EmmanuelNiyonshuti)
+- Changed the parameter type annotation in ``anyio.Path.write_bytes()`` to accept
+  any ``ReadableBuffer``, thus allowing it to accept ``bytearray`` and ``memoryview`` to
+  match ``pathlib.Path.write_bytes()``
+  (`#1135 <https://github.com/agronholm/anyio/issues/1135>`_; PR by @SAY-5)
 - Fixed cancellation exception escaping a cancel scope when triggered via
   ``check_cancelled()`` in a worker thread
   (`#1113 <https://github.com/agronholm/anyio/issues/1113>`_)
@@ -29,6 +37,15 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 - Fixed test resumption after ``KeyboardInterrupt`` in async generator fixtures on the
   asyncio backend
   (`#1060 <https://github.com/agronholm/anyio/issues/1060>`_; PR by @EmmanuelNiyonshuti)
+- Fixed import of ``__main__`` in ``to_process`` workers when entrypoint script
+  doesn't end in ``.py``, such as when using ``console_script`` entrypoints.
+  (`#1027 <https://github.com/agronholm/anyio/issues/1027>`_; PR by @tapetersen)
+- Fixed ``SocketListener.from_socket()`` returning a TCP listener for ``AF_UNIX``
+  listening sockets, causing ``accept()`` to fail with ``ENOTSUP``
+  (`#1132 <https://github.com/agronholm/anyio/issues/1132>`_; PR by @kudato)
+- Fixed ``UDPSocket.aclose()`` and ``ConnectedUDPSocket.aclose()`` on asyncio returning
+  before the underlying socket FD was actually released
+  (`#1147 <https://github.com/agronholm/anyio/pull/1147>`_; PR by @matias-arrelid)
 
 **4.13.0**
 
