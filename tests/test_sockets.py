@@ -8,10 +8,12 @@ import os
 import platform
 import re
 import socket
+import struct
 import sys
 import tempfile
 import threading
 import time
+import warnings
 from collections.abc import Generator, Iterable, Iterator
 from contextlib import suppress
 from ipaddress import IPv4Address, IPv6Address
@@ -143,8 +145,11 @@ def check_asyncio_bug(anyio_backend_name: str, family: AnyIPAddressFamily) -> No
     ):
         import asyncio
 
-        policy = asyncio.get_event_loop_policy()
-        if policy.__class__.__name__ == "WindowsProactorEventLoopPolicy":
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            policy = asyncio.get_event_loop_policy()
+
+        if policy.__class__.__name__.endswith("WindowsProactorEventLoopPolicy"):
             pytest.skip("Does not work due to a known bug (39148)")
 
 
@@ -392,6 +397,19 @@ class TestTCPStream:
         server_sock.close()
         assert client_addr[0] == expected_client_addr
 
+    async def test_connect_tcp_with_local_port(
+        self,
+        server_sock: socket.socket,
+        server_addr: tuple[str, int],
+        family: AnyIPAddressFamily,
+        free_tcp_port: int,
+    ) -> None:
+        local_addr = "127.0.0.1" if family == AddressFamily.AF_INET else "::1"
+        async with await connect_tcp(
+            *server_addr, local_host=local_addr, local_port=free_tcp_port
+        ) as stream:
+            assert stream.extra(SocketAttribute.local_port) == free_tcp_port
+
     @pytest.mark.skipif(
         sys.implementation.name == "pypy",
         reason=(
@@ -548,6 +566,57 @@ class TestTCPStream:
 
         with pytest.raises(ClosedResourceError):
             await stream.send(b"foo")
+
+    async def test_receive_exception_cause_preserved(
+        self, family: AnyIPAddressFamily, request: FixtureRequest
+    ) -> None:
+        """
+        Test that when connection_lost is called with an exception, the resulting
+        BrokenResourceError has the original exception as its __cause__.
+
+        Regression test for https://github.com/agronholm/anyio/issues/1055.
+        """
+        server_sock = socket.create_server(("localhost", 0), family=family)
+        request.addfinalizer(server_sock.close)
+        server_sock.settimeout(1)
+        server_addr = server_sock.getsockname()[:2]
+
+        async with await connect_tcp(*server_addr) as stream:
+            client_sock, _ = server_sock.accept()
+            client_sock.setsockopt(
+                socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+            )
+            client_sock.close()
+            with pytest.raises(BrokenResourceError) as exc_info:
+                await stream.receive()
+
+            assert exc_info.value.__cause__ is not None
+
+    async def test_send_exception_cause_preserved(
+        self, family: AnyIPAddressFamily, request: FixtureRequest
+    ) -> None:
+        """
+        Test that when connection_lost is called with an exception, the resulting
+        BrokenResourceError from send() has the original exception as its __cause__.
+
+        Regression test for https://github.com/agronholm/anyio/issues/1055.
+        """
+        server_sock = socket.create_server(("localhost", 0), family=family)
+        request.addfinalizer(server_sock.close)
+        server_sock.settimeout(1)
+        server_addr = server_sock.getsockname()[:2]
+
+        async with await connect_tcp(*server_addr) as stream:
+            client_sock, _ = server_sock.accept()
+            client_sock.setsockopt(
+                socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+            )
+            client_sock.close()
+            with pytest.raises(BrokenResourceError) as exc_info:
+                for _ in range(1000):
+                    await stream.send(b"foo")
+
+            assert exc_info.value.__cause__ is not None
 
     async def test_connect_tcp_with_tls(
         self,
@@ -1566,8 +1635,15 @@ class TestUNIXListener:
     async def test_from_socket(self, sock_or_fd_factory: SockFdFactoryProtocol) -> None:
         sock_or_fd = sock_or_fd_factory(socket.AF_UNIX, socket.SOCK_STREAM, bound=True)
         async with await SocketListener.from_socket(sock_or_fd) as listener:
-            assert isinstance(listener, SocketListener)
             assert listener.extra(SocketAttribute.family) == socket.AF_UNIX
+
+            local_address = listener.extra(SocketAttribute.local_address)
+            assert isinstance(local_address, str)
+            with socket.socket(socket.AF_UNIX) as client:
+                client.settimeout(1)
+                client.connect(local_address)
+                async with await listener.accept() as stream:
+                    assert stream.extra(SocketAttribute.family) == socket.AF_UNIX
 
 
 async def test_multi_listener(tmp_path_factory: TempPathFactory) -> None:
@@ -1619,6 +1695,39 @@ async def test_multi_listener(tmp_path_factory: TempPathFactory) -> None:
 @pytest.mark.network
 @pytest.mark.usefixtures("check_asyncio_bug")
 class TestUDPSocket:
+    async def test_aclose_waits_for_fd_release(
+        self, family: AnyIPAddressFamily, free_udp_port: int
+    ) -> None:
+        """Regression: ``UDPSocket.aclose`` must not return before the FD is released.
+
+        ``AsyncResource.aclose`` is documented as "close the resource".
+        Callers reasonably expect the local ``(host, port)`` to be
+        immediately rebindable once ``async with udp:`` returns.
+
+        The asyncio backend used to delegate ``aclose`` to
+        ``DatagramTransport.close``, which only *schedules* the FD-closing
+        ``connection_lost`` callback via ``loop.call_soon`` and returns
+        immediately. A caller who bound a fresh socket on the next line
+        (the typical ``from_socket`` pattern: ``socket()`` -> ``bind()``
+        -> ``UDPSocket.from_socket(sock)``) raced the scheduled close and
+        saw ``EADDRINUSE`` even though ``lsof`` reported the port free.
+
+        ``create_udp_socket`` happens to mask this because its own
+        ``await loop.create_datagram_endpoint(local_addr=...)`` yields
+        once, which drains the queued ``connection_lost``. The
+        ``from_socket`` path doesn't yield between aclose and rebind, so
+        it manifested the bug. This test exercises ``from_socket``
+        specifically.
+        """
+        host = "127.0.0.1" if family == socket.AF_INET else "::1"
+        for _ in range(2):
+            sock = socket.socket(family, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((host, free_udp_port))
+            sock.setblocking(False)
+            udp = await UDPSocket.from_socket(sock)
+            await udp.aclose()
+
     async def test_extra_attributes(self, family: AnyIPAddressFamily) -> None:
         async with await create_udp_socket(
             family=family, local_host="localhost"
@@ -1641,7 +1750,9 @@ class TestUDPSocket:
         async with await create_udp_socket(
             local_host="localhost", family=family
         ) as sock:
-            host, port = sock.extra(SocketAttribute.local_address)  # type: ignore[misc]
+            host, port = cast(
+                tuple[str, int], sock.extra(SocketAttribute.local_address)
+            )
             await sock.sendto(b"blah", host, port)
             request, addr = await sock.receive()
             assert request == b"blah"
@@ -1660,8 +1771,8 @@ class TestUDPSocket:
         async with await create_udp_socket(
             family=family, local_host="localhost"
         ) as server:
-            host, port = server.extra(  # type: ignore[misc]
-                SocketAttribute.local_address
+            host, port = cast(
+                tuple[str, int], server.extra(SocketAttribute.local_address)
             )
             async with await create_udp_socket(
                 family=family, local_host="localhost"
@@ -1728,7 +1839,7 @@ class TestUDPSocket:
         udp = await create_udp_socket(
             family=AddressFamily.AF_INET, local_host="localhost"
         )
-        host, port = udp.extra(SocketAttribute.local_address)  # type: ignore[misc]
+        host, port = cast(tuple[str, int], udp.extra(SocketAttribute.local_address))
         await udp.aclose()
         with pytest.raises(ClosedResourceError):
             await udp.sendto(b"foo", host, port)
@@ -1765,6 +1876,29 @@ class TestUDPSocket:
 @pytest.mark.network
 @pytest.mark.usefixtures("check_asyncio_bug")
 class TestConnectedUDPSocket:
+    async def test_aclose_waits_for_fd_release(
+        self, family: AnyIPAddressFamily, free_udp_port: int
+    ) -> None:
+        """Regression: ``ConnectedUDPSocket.aclose`` must not return before the FD is
+        released. Same race as ``UDPSocket.aclose``; see that test for the full
+        explanation.
+        """
+        host = "127.0.0.1" if family == socket.AF_INET else "::1"
+        peer = socket.socket(family, socket.SOCK_DGRAM)
+        peer.bind((host, 0))
+        try:
+            peer_addr = peer.getsockname()
+            for _ in range(2):
+                sock = socket.socket(family, socket.SOCK_DGRAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind((host, free_udp_port))
+                sock.connect(peer_addr)
+                sock.setblocking(False)
+                udp = await ConnectedUDPSocket.from_socket(sock)
+                await udp.aclose()
+        finally:
+            peer.close()
+
     async def test_extra_attributes(self, family: AnyIPAddressFamily) -> None:
         async with await create_connected_udp_socket(
             "localhost", 5000, family=family
@@ -1785,12 +1919,14 @@ class TestConnectedUDPSocket:
         async with await create_udp_socket(
             family=family, local_host="localhost"
         ) as udp1:
-            host, port = udp1.extra(SocketAttribute.local_address)  # type: ignore[misc]
+            host, port = cast(
+                tuple[str, int], udp1.extra(SocketAttribute.local_address)
+            )
             async with await create_connected_udp_socket(
                 host, port, local_host="localhost", family=family
             ) as udp2:
-                host, port = udp2.extra(
-                    SocketAttribute.local_address  # type: ignore[misc]
+                host, port = cast(
+                    tuple[str, int], udp2.extra(SocketAttribute.local_address)
                 )
                 await udp2.send(b"blah")
                 request = await udp1.receive()
@@ -1808,10 +1944,12 @@ class TestConnectedUDPSocket:
         async with await create_udp_socket(
             family=family, local_host="localhost"
         ) as udp1:
-            host, port = udp1.extra(SocketAttribute.local_address)  # type: ignore[misc]
+            host, port = cast(
+                tuple[str, int], udp1.extra(SocketAttribute.local_address)
+            )
             async with await create_connected_udp_socket(host, port) as udp2:
-                host, port = udp2.extra(  # type: ignore[misc]
-                    SocketAttribute.local_address
+                host, port = cast(
+                    tuple[str, int], udp2.extra(SocketAttribute.local_address)
                 )
                 async with create_task_group() as tg:
                     tg.start_soon(serve)
@@ -2360,14 +2498,19 @@ async def test_getaddrinfo() -> None:
 @pytest.mark.parametrize("sock_type", [socket.SOCK_STREAM, socket.SOCK_STREAM])
 async def test_getaddrinfo_ipv6addr(
     sock_type: Literal[socket.SocketKind.SOCK_STREAM],
+    event_loop_implementation_name: str | None,
 ) -> None:
     # IDNA trips up over raw IPv6 addresses
-    proto = 0 if platform.system() == "Windows" else 6
+    if platform.system() == "Windows" and event_loop_implementation_name != "winloop":
+        expected_proto = 0
+    else:
+        expected_proto = 6
+
     assert await getaddrinfo("::1", 0, type=sock_type) == [
         (
             socket.AF_INET6,
             socket.SOCK_STREAM,
-            proto,
+            expected_proto,
             "",
             ("::1", 0),
         )
@@ -2381,6 +2524,9 @@ async def test_getaddrinfo_ipv6_disabled() -> None:
 
 
 async def test_getnameinfo() -> None:
+    if os.getenv("GITHUB_ACTIONS") and platform.system() == "Darwin":
+        pytest.skip("macOS GitHub Actions runner has broken getnameinfo")
+
     expected_result = socket.getnameinfo(("127.0.0.1", 6666), 0)
     result = await getnameinfo(("127.0.0.1", 6666))
     assert result == expected_result

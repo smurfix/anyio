@@ -41,6 +41,88 @@ Here's a demonstration::
 .. _Trio: https://trio.readthedocs.io/en/latest/reference-core.html
    #tasks-let-you-do-multiple-things-at-once
 
+Working with task handles
+-------------------------
+
+Both :meth:`~.abc.TaskGroup.start_soon` and :meth:`~.TaskGroup.create_task` return a
+:class:`~.TaskHandle`. This handle can be used to:
+
+#. Wait for the task to finish before exiting the task group
+#. Retrieve the task's return value or exception
+#. Cancel the task
+#. Check the task's status
+
+.. tabs::
+
+   .. tab:: create_task()
+
+      ::
+
+          from anyio import TaskHandle, create_task_group, run, sleep
+
+
+          async def sometask(num: int) -> str:
+              await sleep(1)
+              return str(num)
+
+
+          async def main() -> None:
+              async with create_task_group() as tg:
+                  handles = [
+                      tg.create_task(sometask(num)) for num in range(5)
+                  ]
+                  handles[1].cancel()
+                  print(await handles[2])
+
+              print(
+                  'Tasks finished:',
+                  ', '.join(
+                      handle.return_value for handle in handles
+                      if handle.status is TaskHandle.Status.FINISHED
+                  )
+              )
+              # Should print:
+              #   2
+              #   Tasks finished: 0, 2, 3, 4
+
+          run(main)
+
+   .. tab:: start_soon()
+
+      ::
+
+          from anyio import TaskHandle, create_task_group, run, sleep
+
+
+          async def sometask(num: int) -> str:
+              await sleep(1)
+              return str(num)
+
+
+          async def main() -> None:
+              async with create_task_group() as tg:
+                  handles = [
+                      tg.start_soon(sometask, num) for num in range(5)
+                  ]
+                  handles[1].cancel()
+                  print(await handles[2])
+
+              print(
+                  'Tasks finished:',
+                  ', '.join(
+                      handle.return_value for handle in handles
+                      if handle.status is TaskHandle.Status.FINISHED
+                  )
+              )
+              # Should print:
+              #   2
+              #   Tasks finished: 0, 2, 3, 4
+
+          run(main)
+
+.. versionchanged:: 4.14.0
+    :meth:`~.abc.TaskGroup.start_soon` now returns a :class:`~.TaskHandle`.
+
 .. _start_initialize:
 
 Starting and initializing tasks
@@ -95,6 +177,40 @@ until then. If the spawned task never calls it, then the
 
 .. note:: Unlike :meth:`~.abc.TaskGroup.start_soon`, :meth:`~.abc.TaskGroup.start` needs
    an ``await``.
+
+Getting a task handle from ``start()``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+By default, :meth:`TaskGroup.start() <.abc.TaskGroup.start>` returns the value passed to
+``task_status.started()``. If you also need a :class:`~.TaskHandle` for the started task
+(e.g. to cancel it or await its return value), pass ``return_handle=True``. In this
+mode, the method returns a :class:`~.TaskHandle` whose :attr:`~.TaskHandle.start_value`
+property contains the value passed to ``task_status.started()``::
+
+    from anyio import create_task_group, run, sleep
+    from anyio.abc import TaskStatus
+
+
+    async def start_some_service(
+        port: int, *, task_status: TaskStatus[int] = TASK_STATUS_IGNORED
+    ) -> int:
+        task_status.started(port)
+        await sleep(10)
+        return 42
+
+
+    async def main() -> None:
+        async with create_task_group() as tg:
+            handle = await tg.start(start_some_service, 5000, return_handle=True)
+            print(f"Service started on port {handle.start_value}")
+            handle.cancel()
+            await handle.wait()
+
+    run(main)
+
+.. versionadded:: 4.14.0
+    The ``return_handle`` parameter was added to
+    :meth:`TaskGroup.start() <.abc.TaskGroup.start>`.
 
 Handling multiple errors in a task group
 ----------------------------------------
@@ -175,10 +291,19 @@ the context of the task group's host task that will be copied, but the context o
 task that calls :meth:`TaskGroup.start() <.abc.TaskGroup.start>` or
 :meth:`TaskGroup.start_soon() <.abc.TaskGroup.start_soon>`.
 
+If you need a task to run in a specific context, you can pass a
+:class:`~contextvars.Context` object to
+:meth:`TaskGroup.create_task() <.abc.TaskGroup.create_task>` via its ``context`` keyword
+argument. When provided, the task will run in the given context instead of inheriting a
+copy of the caller's context.
+
 .. _context: https://docs.python.org/3/library/contextvars.html
 
+Asyncio-specific notes
+----------------------
+
 Differences with asyncio.TaskGroup
-----------------------------------
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The :class:`asyncio.TaskGroup` class, added in Python 3.11, is very similar in design to
 the AnyIO :class:`~.abc.TaskGroup` class. The asyncio counterpart has some important
@@ -187,10 +312,8 @@ differences in its semantics, however:
 * The task group itself is instantiated directly, rather than using a factory function
 * Tasks are spawned solely through :meth:`~asyncio.TaskGroup.create_task`; there is no
   ``start()`` or ``start_soon()`` method
-* The :meth:`~asyncio.TaskGroup.create_task` method returns a task object which can be
-  awaited on (or cancelled)
-* Tasks spawned via :meth:`~asyncio.TaskGroup.create_task` can only be cancelled
-  individually (there is no ``cancel()`` method or similar in the task group)
+* The :meth:`~asyncio.TaskGroup.create_task` method returns an :class:`asyncio.Task`,
+  while AnyIO's :meth:`~.TaskGroup.create_task` returns a :class:`~.TaskHandle`
 * When a task spawned via :meth:`~asyncio.TaskGroup.create_task` is cancelled before its
   coroutine has started running, it will not get a chance to handle the cancellation
   exception
@@ -198,3 +321,55 @@ differences in its semantics, however:
   one of the tasks has triggered a shutdown of the task group
 * Tasks spawned from :class:`asyncio.TaskGroup` use different cancellation semantics
   (see the notes on :ref:`asyncio cancellation semantics <asyncio cancellation>`)
+
+Call graph introspection support
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: 4.12.0
+
+Python 3.14 added support for `call graph introspection`_ on asyncio which lets various
+tools display the tree of Tasks or Futures that are waiting for a specific Future. AnyIO
+supports this mechanism in its own task groups by adding and removing the task's
+"waiter" as appropriate, just like asyncio's own task group class does. Here's a small
+demonstration::
+
+    import asyncio
+
+    from anyio import create_task_group
+
+
+    async def foo(level=0):
+        if level == 3:
+            asyncio.print_call_graph(asyncio.current_task())
+            return
+
+        async with create_task_group() as tg:
+            tg.start_soon(foo, level + 1, name=f"Nesting level {level + 1}")
+
+    asyncio.run(foo())
+
+This results in an output like:
+
+.. code-block::
+
+    * Task(name='Nesting level 3', id=0x7f94f01c43f0)
+      + Call stack:
+      |   File '/usr/lib64/python3.14/asyncio/graph.py', line 276, in print_call_graph()
+      |   File '/tmp/foo.py', line 8, in async foo()
+      + Awaited by:
+        * Task(name='Nesting level 2', id=0x7f94f03334e0)
+          + Call stack:
+          |   File '/tmp/venv/lib64/python3.14/site-packages/anyio/_backends/_asyncio.py', line 755, in async TaskGroup.__aexit__()
+          |   File '/tmp/foo.py', line 11, in async foo()
+          + Awaited by:
+            * Task(name='Nesting level 1', id=0x7f94f03172f0)
+              + Call stack:
+              |   File '/tmp/venv/lib64/python3.14/site-packages/anyio/_backends/_asyncio.py', line 755, in async TaskGroup.__aexit__()
+              |   File '/tmp/foo.py', line 11, in async foo()
+              + Awaited by:
+                * Task(name='Task-1', id=0x7f94f0316f30)
+                  + Call stack:
+                  |   File '/tmp/venv/lib64/python3.14/site-packages/anyio/_backends/_asyncio.py', line 755, in async TaskGroup.__aexit__()
+                  |   File '/tmp/foo.py', line 11, in async foo()
+
+.. _call graph introspection: https://docs.python.org/3.14/library/asyncio-graph.html

@@ -25,7 +25,7 @@ To run a (synchronous) callable in a worker thread::
     run(main)
 
 By default, tasks are shielded from cancellation while they are waiting for a worker
-thread to finish. You can pass the ``cancellable=True`` parameter to allow such tasks to
+thread to finish. You can pass the ``abandon_on_cancel=True`` parameter to allow such tasks to
 be cancelled. Note, however, that the thread will still continue running – only its
 outcome will be ignored.
 
@@ -153,7 +153,7 @@ manager and keeping it open::
 
     run(main)
 
-The second option using :func:`~.from_thread.start_blocking_portal` to launch a new
+The second option uses :func:`~.from_thread.start_blocking_portal` to launch a new
 event loop in its own dedicated thread::
 
     from anyio.from_thread import start_blocking_portal

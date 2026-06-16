@@ -3,21 +3,28 @@ from __future__ import annotations
 import asyncio
 import gc
 import math
+import re
 import sys
 import time
 from asyncio import CancelledError
 from collections.abc import AsyncGenerator, Coroutine, Generator
+from contextlib import aclosing
+from contextvars import ContextVar, copy_context
 from typing import Any, NoReturn, cast
 from unittest import mock
 
 import pytest
-from exceptiongroup import catch
 from pytest import FixtureRequest, MonkeyPatch
 
 import anyio
 from anyio import (
     TASK_STATUS_IGNORED,
     CancelScope,
+    Event,
+    TaskCancelled,
+    TaskFailed,
+    TaskHandle,
+    TaskNotFinished,
     create_task_group,
     current_effective_deadline,
     current_time,
@@ -69,17 +76,18 @@ async def test_success() -> None:
 
 
 @pytest.mark.parametrize(
-    "module",
+    "modulename",
     [
-        pytest.param(asyncio, id="asyncio"),
-        pytest.param(pytest.importorskip("trio"), id="trio"),
+        pytest.param("asyncio"),
+        pytest.param("trio"),
     ],
 )
-def test_run_natively(module: Any) -> None:
+def test_run_natively(modulename: str) -> None:
     async def testfunc() -> None:
         async with create_task_group() as tg:
             tg.start_soon(sleep, 0)
 
+    module = pytest.importorskip(modulename, reason=f"{modulename} is not available")
     if module is asyncio:
         asyncio.run(testfunc())
     else:
@@ -105,6 +113,19 @@ async def test_start_soon_after_error() -> None:
     exc.match("This task group is not active; no new tasks can be started")
 
 
+async def test_start_already_closed() -> None:
+    async def taskfunc(*, task_status: TaskStatus) -> None:
+        task_status.started()
+
+    async with create_task_group() as tg:
+        pass
+
+    with pytest.raises(RuntimeError) as exc:
+        await tg.start(taskfunc)
+
+    exc.match("This task group is not active; no new tasks can be started")
+
+
 async def test_start_no_value() -> None:
     async def taskfunc(*, task_status: TaskStatus) -> None:
         task_status.started()
@@ -126,6 +147,36 @@ async def test_start_called_twice() -> None:
     async with create_task_group() as tg:
         value = await tg.start(taskfunc)
         assert value is None
+
+
+async def test_start_sync_wrapper() -> None:
+    async def taskfunc() -> int:
+        return 8
+
+    def wrapper(*, task_status: TaskStatus[int]) -> Coroutine[Any, Any, int]:
+        task_status.started(5)
+        return taskfunc()
+
+    async with create_task_group() as tg:
+        handle = await tg.start(wrapper, return_handle=True)
+        assert handle.start_value == 5
+        assert await handle == 8
+
+
+async def test_start_sync_wrapper_called_twice() -> None:
+    async def taskfunc() -> None:
+        pass
+
+    def wrapper(*, task_status: TaskStatus) -> Coroutine[Any, Any, None]:
+        task_status.started()
+        task_status.started()
+        return taskfunc()
+
+    async with create_task_group() as tg:
+        with pytest.raises(
+            RuntimeError, match="called 'started' twice on the same task status"
+        ):
+            await tg.start(wrapper)
 
 
 async def test_no_called_started_twice() -> None:
@@ -265,8 +316,13 @@ async def test_propagate_native_cancellation_from_taskgroup() -> None:
 async def test_cancel_with_nested_task_groups() -> None:
     """Regression test for #695."""
 
+    from anyio._backends import _asyncio
+
+    class EditableCancelScope(_asyncio.CancelScope):
+        pass
+
     async def shield_task() -> None:
-        with CancelScope(shield=True) as scope:
+        with EditableCancelScope(shield=True) as scope:
             with mock.patch.object(
                 scope,
                 "_deliver_cancellation",
@@ -290,31 +346,32 @@ async def test_cancel_with_nested_task_groups() -> None:
             assert len(middle_cancel_spy.call_args_list) < 10
             assert len(outer_cancel_spy.call_args_list) < 10
 
-    async with create_task_group() as tg:
-        with mock.patch.object(
-            tg.cancel_scope,
-            "_deliver_cancellation",
-            wraps=getattr(tg.cancel_scope, "_deliver_cancellation"),
-        ) as outer_cancel_spy:
-            tg.start_soon(middle_task, name="middle task")
-            await wait_all_tasks_blocked()
-            tg.cancel_scope.cancel()
+    with mock.patch.object(_asyncio, "CancelScope", EditableCancelScope):
+        async with create_task_group() as tg:
+            with mock.patch.object(
+                tg.cancel_scope,
+                "_deliver_cancellation",
+                wraps=getattr(tg.cancel_scope, "_deliver_cancellation"),
+            ) as outer_cancel_spy:
+                tg.start_soon(middle_task, name="middle task")
+                await wait_all_tasks_blocked()
+                tg.cancel_scope.cancel()
 
     assert len(outer_cancel_spy.call_args_list) < 10
 
 
-async def test_start_exception_delivery(anyio_backend_name: str) -> None:
+@pytest.mark.parametrize("return_handle", [False, True])
+async def test_start_exception_delivery(return_handle: bool) -> None:
     def task_fn(*, task_status: TaskStatus[str] = TASK_STATUS_IGNORED) -> None:
         task_status.started("hello")
 
-    if anyio_backend_name == "trio":
-        pattern = "appears to be synchronous"
-    else:
-        pattern = "is not a coroutine object"
-
-    async with anyio.create_task_group() as tg:
-        with pytest.raises(TypeError, match=pattern):
-            await tg.start(task_fn)  # type: ignore[arg-type]
+    pattern = (
+        r"^Expected .*\(\) to return a coroutine, but the return value \(None\) is not "
+        r"a coroutine object$"
+    )
+    with pytest.RaisesGroup(pytest.RaisesExc(TypeError, match=pattern)):
+        async with anyio.create_task_group() as tg:
+            await tg.start(task_fn, return_handle=return_handle)  # type: ignore[call-overload]
 
 
 async def test_start_cancel_after_error() -> None:
@@ -377,6 +434,30 @@ async def test_level_cancellation() -> None:
         tg.cancel_scope.cancel()
 
     assert marker == 1
+
+
+async def test_cancel() -> None:
+    started = False
+
+    async def dummy() -> None:
+        nonlocal started
+        started = True
+        await checkpoint()
+        pytest.fail("Execution should not reach this point")
+
+    async with create_task_group() as tg:
+        tg.start_soon(dummy)
+        assert not started
+        tg.cancel()
+
+    assert started
+
+
+async def test_cancel_with_reason() -> None:
+    async with create_task_group() as tg:
+        tg.cancel("test reason")
+        with pytest.raises(get_cancelled_exc_class(), match="test reason"):
+            await checkpoint()
 
 
 async def test_failing_child_task_cancels_host() -> None:
@@ -1063,8 +1144,8 @@ async def test_triple_nested_shield_checkpoint_in_middle() -> None:
     assert not got_past_checkpoint
 
 
-async def test_exception_group_filtering() -> None:
-    """Test that CancelledErrors are filtered out of nested exception groups."""
+async def test_nested_task_group_filtering() -> None:
+    """Test that CancelledErrors are filtered out of nested exception groups from task groups."""
 
     async def fail(name: str) -> NoReturn:
         try:
@@ -1087,6 +1168,86 @@ async def test_exception_group_filtering() -> None:
     assert isinstance(exc.value.exceptions[1], ExceptionGroup)
     assert len(exc.value.exceptions[1].exceptions) == 1
     assert str(exc.value.exceptions[1].exceptions[0]) == "child task failed"
+
+
+async def test_exception_group_filtering() -> None:
+    """
+    Test that CancelledErrors are filtered out of exception groups containing other exceptions.
+
+    See also test_reraise_cancelled_in_excgroup.
+    """
+
+    body_exc = RuntimeError()
+
+    def check_body_exc(exc: RuntimeError, /) -> bool:
+        return exc is body_exc
+
+    with pytest.RaisesGroup(
+        pytest.RaisesExc(RuntimeError, check=check_body_exc)
+    ) as exc_info:
+        with CancelScope() as cs:
+            cs.cancel()
+            try:
+                raise body_exc
+            except BaseException as exc:
+                exceptions = [exc]
+
+                try:
+                    await checkpoint()
+                except BaseException as exc2:
+                    exceptions.append(exc2)
+                else:
+                    pytest.fail("Did not raise a cancellation exception")
+
+                try:
+                    original_group = BaseExceptionGroup("", exceptions)
+                    raise original_group
+                finally:
+                    # Prevent reference cycles.
+                    del exceptions
+
+    assert exc_info.value.__cause__ == original_group.__cause__
+    assert exc_info.value.__context__ == original_group.__context__
+
+
+async def test_nested_exception_group_filtering() -> None:
+    """
+    Test that CancelledErrors are filtered out of nested exception groups containing other exceptions.
+    """
+
+    body_exc = RuntimeError()
+
+    def check_body_exc(exc: RuntimeError, /) -> bool:
+        return exc is body_exc
+
+    with pytest.RaisesGroup(
+        pytest.RaisesGroup(pytest.RaisesExc(RuntimeError, check=check_body_exc))
+    ) as exc_info:
+        with CancelScope() as cs:
+            cs.cancel()
+            try:
+                raise body_exc
+            except BaseException as exc:
+                exceptions = [exc]
+
+                try:
+                    await checkpoint()
+                except BaseException as exc2:
+                    exceptions.append(exc2)
+                else:
+                    pytest.fail("Did not raise a cancellation exception")
+
+                try:
+                    original_group = BaseExceptionGroup(
+                        "", (BaseExceptionGroup("", exceptions),)
+                    )
+                    raise original_group
+                finally:
+                    # Prevent reference cycles.
+                    del exceptions
+
+    assert exc_info.value.__cause__ == original_group.__cause__
+    assert exc_info.value.__context__ == original_group.__context__
 
 
 async def test_cancel_propagation_with_inner_spawn() -> None:
@@ -1129,7 +1290,7 @@ def test_cancel_generator_based_task() -> None:
             await asyncio.sleep(1)
             pytest.fail("Execution should not have reached this line")
 
-    @asyncio.coroutine  # type: ignore[attr-defined]
+    @asyncio.coroutine  # type: ignore[attr-defined, untyped-decorator]
     def generator_part() -> Generator[object, BaseException, None]:
         yield from native_coro_part()  # type: ignore[misc]
 
@@ -1150,7 +1311,7 @@ async def test_schedule_old_style_coroutine_func() -> None:
     generator-style coroutine function.
     """
 
-    @asyncio.coroutine  # type: ignore[attr-defined]
+    @asyncio.coroutine  # type: ignore[attr-defined, untyped-decorator]
     def corofunc() -> Generator[Any, Any, None]:
         yield from asyncio.sleep(1)  # type: ignore[misc]
 
@@ -1288,24 +1449,18 @@ async def test_cancelscope_exit_before_enter() -> None:
     "anyio_backend", asyncio_params
 )  # trio does not check for this yet
 async def test_cancelscope_exit_in_wrong_task() -> None:
-    async def enter_scope(scope: CancelScope) -> None:
-        scope.__enter__()
-
     async def exit_scope(scope: CancelScope) -> None:
         scope.__exit__(None, None, None)
 
-    scope = CancelScope()
-    async with create_task_group() as tg:
-        tg.start_soon(enter_scope, scope)
-
-    with pytest.raises(ExceptionGroup) as exc:
-        async with create_task_group() as tg:
-            tg.start_soon(exit_scope, scope)
-
-    assert len(exc.value.exceptions) == 1
-    assert str(exc.value.exceptions[0]) == (
-        "Attempted to exit cancel scope in a different task than it was entered in"
-    )
+    with CancelScope() as scope:
+        with pytest.RaisesGroup(
+            pytest.RaisesExc(
+                RuntimeError,
+                match="Attempted to exit cancel scope in a different task than it was entered in",
+            )
+        ):
+            async with create_task_group() as tg:
+                tg.start_soon(exit_scope, scope)
 
 
 def test_unhandled_exception_group(caplog: pytest.LogCaptureFixture) -> None:
@@ -1538,6 +1693,19 @@ class TestUncancel:
         assert not task.cancelling()
 
 
+async def test_taskgroup_reentry() -> None:
+    """Test that entering a TaskGroup more than once raises RuntimeError."""
+    tg = create_task_group()
+    async with tg:
+        pass
+
+    with pytest.raises(
+        RuntimeError, match="TaskGroup cannot be entered more than once"
+    ):
+        async with tg:
+            pass
+
+
 async def test_cancel_before_entering_task_group() -> None:
     with CancelScope() as scope:
         scope.cancel()
@@ -1549,13 +1717,12 @@ async def test_cancel_before_entering_task_group() -> None:
 
 
 async def test_reraise_cancelled_in_excgroup() -> None:
-    def handler(excgrp: BaseExceptionGroup) -> None:
-        raise
-
     with CancelScope() as scope:
         scope.cancel()
-        with catch({get_cancelled_exc_class(): handler}):
+        try:
             await anyio.sleep_forever()
+        except get_cancelled_exc_class() as exc:
+            raise BaseExceptionGroup("", [exc]) from None
 
 
 async def test_cancel_child_task_when_host_is_shielded() -> None:
@@ -1597,6 +1764,31 @@ async def test_start_cancels_parent_scope() -> None:
 
     assert started
     assert not tg.cancel_scope.cancel_called
+
+
+async def test_start_return_handle_success() -> None:
+    async def taskfunc(x: int, y: int, *, task_status: TaskStatus[int]) -> int:
+        task_status.started(3)
+        await checkpoint()
+        return x + y
+
+    async with create_task_group() as tg:
+        handle = await tg.start(taskfunc, 4, 5, return_handle=True)
+        assert handle.start_value == 3
+        assert await handle == 9
+
+
+async def test_start_return_handle_cancel() -> None:
+    async def taskfunc(*, task_status: TaskStatus[int]) -> int:
+        task_status.started(3)
+        await sleep(5)
+        pytest.fail("should not reach this point")
+
+    async with create_task_group() as tg:
+        handle = await tg.start(taskfunc, return_handle=True)
+        handle.cancel()
+        await handle.wait()
+        assert handle.start_value == 3
 
 
 @pytest.mark.skipif(
@@ -1649,7 +1841,6 @@ class TestRefcycles:
     async def test_exception_refcycles_parent_task(self) -> None:
         """Test that TaskGroup's cancel_scope deletes self._host_task"""
         tg = create_task_group()
-        exc = None
 
         class _Done(Exception):
             pass
@@ -1658,13 +1849,12 @@ class TestRefcycles:
             async with tg:
                 raise _Done
 
-        try:
+        with pytest.RaisesGroup(pytest.RaisesGroup(pytest.RaisesExc(_Done))) as excinfo:
             async with anyio.create_task_group() as tg2:
                 tg2.start_soon(coro_fn)
-        except ExceptionGroup as excs:
-            exc = excs.exceptions[0].exceptions[0]
 
-        assert isinstance(exc, _Done)
+        exc = excinfo.value.exceptions[0].exceptions[0]
+        del excinfo
         assert gc.get_referrers(exc) == no_other_refs()
 
     async def test_exception_refcycles_propagate_cancellation_error(self) -> None:
@@ -1816,3 +2006,268 @@ async def test_cancel_reason() -> None:
     assert task and task.name
     exc_info.match("test reason")
     exc_info.match(task.name)
+
+
+@pytest.mark.parametrize(
+    "native",
+    [
+        pytest.param(False, id="anyio"),
+        pytest.param(True, id="asyncio"),
+    ],
+)
+@pytest.mark.skipif(sys.version_info < (3, 14), reason="Requires Python 3.14")
+@pytest.mark.parametrize("anyio_backend", asyncio_params)
+async def test_asyncio_call_graph(native: bool) -> None:
+    graph: asyncio.FutureCallGraph | None = None
+
+    async def taskfunc(depth: int) -> None:
+        nonlocal graph
+
+        if depth == 2:
+            # The checkpoint is a workaround for eager factories where call graph
+            # capturing doesn't work before the first yield
+            await checkpoint()
+            graph = asyncio.capture_call_graph(asyncio.current_task(), depth=depth)
+            return
+
+        if native:
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(taskfunc(depth + 1), name=f"depth-{depth + 1}")
+        else:
+            async with create_task_group() as tg:
+                tg.start_soon(taskfunc, depth + 1, name=f"depth-{depth + 1}")
+
+    current_task = asyncio.current_task()
+    assert current_task is not None
+    current_task.set_name("root")
+    await taskfunc(0)
+    assert graph is not None
+    assert isinstance(graph.future, asyncio.Task)
+    task_names: list[str] = [graph.future.get_name()]
+    while graph.awaited_by:
+        assert len(graph.awaited_by) == 1
+        graph = graph.awaited_by[0]
+        assert isinstance(graph.future, asyncio.Task)
+        task_names.append(graph.future.get_name())
+
+    assert task_names == ["depth-2", "depth-1", "root"]
+
+
+class TestCreateTask:
+    async def test_coro_attr(self) -> None:
+        async def taskfunc() -> None:
+            pass
+
+        coro = taskfunc()
+        async with create_task_group() as tg:
+            handle = tg.create_task(coro)
+            assert handle.coro is coro
+
+    async def test_non_coro(self) -> None:
+        async def taskfunc() -> None:
+            pass
+
+        async with create_task_group() as tg:
+            with pytest.raises(TypeError, match="expected a coroutine, got "):
+                tg.create_task(taskfunc)  # type: ignore[arg-type]
+
+    async def test_return_value(self) -> None:
+        async def taskfunc(x: int, y: int) -> int:
+            return x + y
+
+        async with create_task_group() as tg:
+            handle = tg.create_task(taskfunc(2, 4))
+            with pytest.raises(TaskNotFinished, match="the task has not finished yet"):
+                handle.return_value  # noqa: B018
+
+            assert re.match(
+                r"<TaskHandle pending "
+                r"name='TestCreateTask.test_return_value.<locals>.taskfunc' "
+                r"coro=<coroutine object(.+)>>",
+                repr(handle),
+            )
+            assert await handle == 6
+            assert re.match(
+                r"<TaskHandle finished "
+                r"name='TestCreateTask.test_return_value.<locals>.taskfunc' "
+                r"coro=<coroutine object(.+)>>",
+                repr(handle),
+            )
+
+        assert handle.return_value == 6
+        assert handle.exception is None
+
+    async def test_exception(self) -> None:
+        async def taskfunc() -> NoReturn:
+            raise RuntimeError("dummy error")
+
+        with pytest.RaisesGroup(pytest.RaisesExc(RuntimeError, match="dummy error")):
+            async with create_task_group() as tg:
+                handle = tg.create_task(taskfunc())
+                with pytest.raises(
+                    TaskNotFinished, match="the task has not finished yet"
+                ):
+                    handle.exception  # noqa: B018
+
+                with pytest.raises(TaskFailed, match="the task raised an exception"):
+                    await handle
+
+                assert handle.status is TaskHandle.Status.FAILED
+
+        assert re.match(
+            r"<TaskHandle failed "
+            r"name='TestCreateTask.test_exception.<locals>.taskfunc' "
+            r"coro=<coroutine object(.+)>",
+            repr(handle),
+        )
+        assert isinstance(handle.exception, RuntimeError)
+        with pytest.raises(TaskFailed, match="the task raised an exception"):
+            handle.return_value  # noqa: B018
+
+    def test_base_exception(
+        self, anyio_backend_name: str, anyio_backend_options: dict[str, Any]
+    ) -> None:
+        async def taskfunc() -> NoReturn:
+            raise SystemExit(5)
+
+        async def main() -> None:
+            async with create_task_group() as tg:
+                handle = tg.create_task(taskfunc())
+                with pytest.raises(TaskFailed, match="the task raised an exception"):
+                    await handle
+
+                assert handle.status is TaskHandle.Status.FAILED
+                assert re.match(
+                    r"<TaskHandle failed "
+                    r"name='TestCreateTask.test_base_exception.<locals>.taskfunc' "
+                    r"coro=<coroutine object(.+)>",
+                    repr(handle),
+                )
+
+        with pytest.RaisesGroup(
+            pytest.RaisesExc(SystemExit, match="5"), allow_unwrapped=True
+        ):
+            anyio.run(
+                main, backend=anyio_backend_name, backend_options=anyio_backend_options
+            )
+
+    @pytest.mark.parametrize("wait_until_running", [True, False])
+    async def test_cancel(self, wait_until_running: bool) -> None:
+        """
+        Test that the task function gets to run until the first
+        checkpoint when it's cancelled right after creation.
+        """
+        task_started = False
+        event = Event()
+
+        async def taskfunc() -> None:
+            nonlocal task_started
+            task_started = True
+            await event.wait()
+
+        async with create_task_group() as tg:
+            handle = tg.create_task(taskfunc())
+            if wait_until_running:
+                await wait_all_tasks_blocked()
+
+            handle.cancel()
+            assert handle.status is TaskHandle.Status.CANCELLING
+            assert re.match(
+                r"<TaskHandle cancelling "
+                r"name='TestCreateTask.test_cancel.<locals>.taskfunc' "
+                r"coro=<coroutine object(.+)>>",
+                repr(handle),
+            )
+            with pytest.raises(TaskCancelled, match="the task was cancelled"):
+                handle.return_value  # noqa: B018
+
+            with pytest.raises(TaskCancelled, match="the task was cancelled"):
+                handle.exception  # noqa: B018
+
+            with pytest.raises(TaskCancelled, match="the task was cancelled"):
+                await handle
+
+        with pytest.raises(TaskCancelled, match="the task was cancelled") as exc_info:
+            await handle
+
+        assert isinstance(exc_info.value.__cause__, get_cancelled_exc_class())
+
+        assert handle.status is TaskHandle.Status.CANCELLED
+        assert task_started
+        assert re.match(
+            r"<TaskHandle cancelled "
+            r"name='TestCreateTask.test_cancel.<locals>.taskfunc' "
+            r"coro=<coroutine object(.+)>>",
+            repr(handle),
+        )
+
+    async def test_custom_context(self) -> None:
+        ctxvar = ContextVar[int]("ctxvar")
+        ctx = copy_context()
+        ctx.run(ctxvar.set, 42)
+
+        async def taskfunc() -> int:
+            return ctxvar.get()
+
+        assert ctxvar.get(None) is None
+        async with create_task_group() as tg:
+            assert await tg.create_task(taskfunc(), context=ctx) == 42
+
+    async def test_task_name_default(self) -> None:
+        async def taskfunc() -> str | None:
+            return get_current_task().name
+
+        async with create_task_group() as tg:
+            handle = tg.create_task(taskfunc())
+            assert re.match(
+                r"<TaskHandle pending "
+                r"name='TestCreateTask.test_task_name_default.<locals>.taskfunc' "
+                r"coro=<coroutine object(.+)>>",
+                repr(handle),
+            )
+            assert await handle == handle.name
+
+        assert handle.name == "TestCreateTask.test_task_name_default.<locals>.taskfunc"
+
+    async def test_task_name_custom_name(self) -> None:
+        async def taskfunc() -> None:
+            assert get_current_task().name == "custom name"
+
+        async with create_task_group() as tg:
+            handle = tg.create_task(taskfunc(), name="custom name")
+            assert handle.name == "custom name"
+            assert re.match(
+                r"<TaskHandle pending name='custom name' coro=<coroutine object(.+)>>",
+                repr(handle),
+            )
+
+    async def test_wait(self) -> None:
+        async def taskfunc() -> None:
+            raise RuntimeError("dummy error")
+
+        with pytest.RaisesGroup(pytest.RaisesExc(RuntimeError, match="dummy error")):
+            async with create_task_group() as tg:
+                handle = tg.create_task(taskfunc())
+                assert handle.status is TaskHandle.Status.PENDING
+                await handle.wait()
+
+        assert str(handle.exception) == "dummy error"
+        assert handle.status is TaskHandle.Status.FAILED
+        await handle.wait()
+
+
+@pytest.mark.parametrize("create_task", [False, True])
+async def test_task_from_asyncgen_asend(create_task: bool) -> None:
+    async def genfunc(x: int, y: int) -> AsyncGenerator[int, None]:
+        yield x + y
+
+    async with create_task_group() as tg:
+        async with aclosing(genfunc(3, 5)) as g:
+            if create_task:
+                handle = tg.create_task(g.asend(None))
+                assert handle.name.startswith("<async_generator_asend object at ")
+            else:
+                handle = tg.start_soon(g.asend, None)
+                assert handle.name == "async_generator.asend"
+
+            assert await handle == 8

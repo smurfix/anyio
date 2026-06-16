@@ -3,6 +3,168 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
+**4.14.0**
+
+- Added support for Python 3.15
+- Added an asynchronous implementation of the ``itertools`` module
+  (`#998 <https://github.com/agronholm/anyio/issues/998>`_; PR by @11kkw)
+- Added the ``local_port`` parameter to ``connect_tcp()`` to allow binding to a
+  specific local port before connecting
+  (`#1067 <https://github.com/agronholm/anyio/issues/1067>`_; PR by @nullwiz)
+- Added support for custom capacity limiters in async path and file I/O
+  functions and classes
+- Added the ``create_task()`` task group method for easier asyncio migration (returns a
+  ``TaskHandle``)
+  (`#1098 <https://github.com/agronholm/anyio/pull/1098>`_)
+- Changed ``TaskGroup.start_soon()`` to return a ``TaskHandle``
+- Added an option for ``TaskGroup.start()`` to return a ``TaskHandle`` (which then
+  contains the start value in the ``start_value`` property)
+- Added the ``cancel()`` convenience method to ``TaskGroup`` as a shortcut for
+  cancelling the task group's cancel scope
+- Improved the error message when a known backend is not installed to suggest the
+  install command
+  (`#1115 <https://github.com/agronholm/anyio/pull/1115>`_; PR by @EmmanuelNiyonshuti)
+- Improved ``anyio.Path`` to preserve subclass types by returning ``Self`` in methods
+  that return path objects
+  (`#1130 <https://github.com/agronholm/anyio/issues/1130>`_; PR by @EmmanuelNiyonshuti)
+- Changed the parameter type annotation in ``anyio.Path.write_bytes()`` to accept
+  any ``ReadableBuffer``, thus allowing it to accept ``bytearray`` and ``memoryview`` to
+  match ``pathlib.Path.write_bytes()``
+  (`#1135 <https://github.com/agronholm/anyio/issues/1135>`_; PR by @SAY-5)
+- Changed several type annotations to only accept callables returning coroutine-like
+  objects instead of arbitrary awaitables:
+
+  - ``TaskGroup.start_soon()``
+  - ``TaskGroup.start()``
+  - ``anyio.from_thread.run()``
+
+  This reverts an earlier change from v3.7.0 which was made in error.
+  (`#1153 <https://github.com/agronholm/anyio/pull/1153>`_)
+- Changed ``anyio.run`` to support callables returning arbitrary awaitables at runtime
+  on all backends. Previously, this only worked on asyncio (`#1171
+  <https://github.com/agronholm/anyio/pull/1171>`_; PR by @gschaffner)
+- Changed several classes (and their subclasses) to have ``__slots__`` (with
+  ``__weakref__``):
+
+  * ``anyio.CancelScope``
+  * ``anyio.CapacityLimiter``
+  * ``anyio.Condition``
+  * ``anyio.Event``
+  * ``anyio.Lock``
+  * ``anyio.ResourceGuard``
+  * ``anyio.Semaphore``
+- Fixed cancellation exception escaping a cancel scope when triggered via
+  ``check_cancelled()`` in a worker thread
+  (`#1113 <https://github.com/agronholm/anyio/issues/1113>`_)
+- Fixed ``TaskGroup`` raising ``AttributeError`` instead of a clear error when entered
+  more than once
+  (`#1109 <https://github.com/agronholm/anyio/issues/1109>`_; PR by @bahtya)
+- Fixed lost type information when passing arguments to ``lru_cache``
+  (`#1104 <https://github.com/agronholm/anyio/pull/1104>`_; PR by @Graeme22)
+- Fixed test resumption after ``KeyboardInterrupt`` in async generator fixtures on the
+  asyncio backend
+  (`#1060 <https://github.com/agronholm/anyio/issues/1060>`_; PR by @EmmanuelNiyonshuti)
+- Fixed import of ``__main__`` in ``to_process`` workers when entrypoint script
+  doesn't end in ``.py``, such as when using ``console_script`` entrypoints.
+  (`#1027 <https://github.com/agronholm/anyio/issues/1027>`_; PR by @tapetersen)
+- Fixed ``SocketListener.from_socket()`` returning a TCP listener for ``AF_UNIX``
+  listening sockets, causing ``accept()`` to fail with ``ENOTSUP``
+  (`#1132 <https://github.com/agronholm/anyio/issues/1132>`_; PR by @kudato)
+- Fixed ``UDPSocket.aclose()`` and ``ConnectedUDPSocket.aclose()`` on asyncio returning
+  before the underlying socket FD was actually released
+  (`#1147 <https://github.com/agronholm/anyio/pull/1147>`_; PR by @matias-arrelid)
+- Fixed trio backend test runner hanging indefinitely instead of raising an error
+  when dynamically accessing an async fixture via ``request.getfixturevalue``
+  (`#1148 <https://github.com/agronholm/anyio/issues/1148>`_; PR by @EmmanuelNiyonshuti)
+- Fixed cancelling tasks started through a ``BlockingPortal`` after the portal has been
+  stopped
+  (`#1013 <https://github.com/agronholm/anyio/issues/1013>`_; PR by @puneetdixit200)
+- Fixed ``backend_options`` being ignored when running the Trio backend via
+  ``anyio.run()``; the options are now passed as keyword arguments to ``trio.run()``
+  again, as documented (a regression from AnyIO 3)
+  (`#1161 <https://github.com/agronholm/anyio/pull/1161>`_; PR by @Zac-HD)
+- Fixed asyncio ``Lock`` and ``Semaphore`` deadlocks caused by cancelled waiters
+  left queued during release
+  (`#1145 <https://github.com/agronholm/anyio/pull/1145>`_; PR by @rasmusfaber,
+  @x42005e1f and @agronholm)
+
+**4.13.0**
+
+- Dropped support for Python 3.9
+- Added a ``ttl`` parameter to the ``anyio.functools.lru_cache`` wrapper
+  (`#1073 <https://github.com/agronholm/anyio/pull/1073>`_; PR by @Graeme22)
+- Widened the type annotations of file I/O streams to accept ``IO[bytes]``
+  instead of just ``BinaryIO``
+  (`#1078 <https://github.com/agronholm/anyio/issues/1078>`_)
+- Fixed ``anyio.Path`` not being compatible with Python 3.15 due to the removal of
+  ``pathlib.Path.is_reserved()`` and the addition of ``pathlib.Path.__vfspath__()``
+  (`#1061 <https://github.com/agronholm/anyio/issues/1061>`_; PR by @veeceey)
+- Fixed the ``BrokenResourceError`` raised by the asyncio ``SocketStream`` not having
+  the original exception as its cause
+  (`#1055 <https://github.com/agronholm/anyio/issues/1055>`_; PR by @veeceey)
+- Fixed the ``TypeError`` raised when using "func" as a parameter name in
+  ``pytest.mark.parametrize`` when using the pytest plugin
+  (`#1068 <https://github.com/agronholm/anyio/pull/1068>`_; PR by @JohnnyDeuss)
+- Fixed the pytest plugin not running tests that had the ``anyio`` marker added
+  programmatically via ``pytest_collection_modifyitems``
+  (`#422 <https://github.com/agronholm/anyio/issues/422>`_; PR by @chbndrhnns)
+- Fixed cancellation exceptions leaking from a ``CancelScope`` on asyncio when they are
+  contained in an exception group alongside non-cancellation exceptions (`#1091
+  <https://github.com/agronholm/anyio/issues/1091>`_; PR by @gschaffner)
+- Fixed ``Condition.wait()`` not passing on a notification when the task is cancelled
+  but already received a notification
+- Fixed inverted condition in the process pool shutdown phase which would cause
+  still-running pooled processes not to be terminated
+  (`#1074 <https://github.com/agronholm/anyio/pull/1074>`_; PR by @bysiber)
+
+**4.12.1**
+
+- Changed all functions currently raising the private ``NoCurrentAsyncBackend``
+  exception (since v4.12.0) to instead raise the public ``NoEventLoopError`` exception
+  (`#1048 <https://github.com/agronholm/anyio/issues/1048>`_)
+- Fixed ``anyio.functools.lru_cache`` not working with instance methods
+  (`#1042 <https://github.com/agronholm/anyio/issues/1042>`_)
+
+**4.12.0**
+
+- Added support for asyncio's `task call graphs`_ on Python 3.14 and later when using
+  AnyIO's task groups
+  (`#1025 <https://github.com/agronholm/anyio/pull/1025>`_)
+- Added an asynchronous implementation of the ``functools`` module
+  (`#1001 <https://github.com/agronholm/anyio/pull/1001>`_)
+- Added support for ``uvloop=True`` on Windows via the winloop_ implementation
+  (`#960 <https://github.com/agronholm/anyio/pull/960>`_; PR by @Vizonex)
+- Added support for use as a context manager to ``anyio.lowlevel.RunVar``
+  (`#1003 <https://github.com/agronholm/anyio/pull/1003>`_)
+- Added ``__all__`` declarations to public submodules (``anyio.lowlevel`` etc.)
+  (`#1009 <https://github.com/agronholm/anyio/pull/1009>`_)
+- Added the ability to set the token count of a ``CapacityLimiter`` to zero
+  (`#1019 <https://github.com/agronholm/anyio/pull/1019>`_; requires Python 3.10 or
+  later when using Trio)
+- Added parameters ``case_sensitive`` and ``recurse_symlinks`` along with support for
+  path-like objects to ``anyio.Path.glob()`` and ``anyio.Path.rglob()``
+  (`#1033 <https://github.com/agronholm/anyio/pull/1033>`_; PR by @northisup)
+- Dropped ``sniffio`` as a direct dependency and added the ``get_available_backends()``
+  function (`#1021 <https://github.com/agronholm/anyio/pull/1021>`_)
+- Fixed ``Process.stdin.send()`` not raising ``ClosedResourceError`` and
+  ``BrokenResourceError`` on asyncio. Previously, a non-AnyIO exception was raised in
+  such cases (`#671 <https://github.com/agronholm/anyio/issues/671>`_; PR by
+  @gschaffner)
+- Fixed ``Process.stdin.send()`` not checkpointing before writing data on asyncio
+  (`#1002 <https://github.com/agronholm/anyio/issues/1002>`_; PR by @gschaffner)
+- Fixed a race condition where cancelling a ``Future`` from
+  ``BlockingPortal.start_task_soon()`` would sometimes not cancel the async function
+  (`#1011 <https://github.com/agronholm/anyio/issues/1011>`_; PR by @gschaffner)
+- Fixed the presence of the pytest plugin causing breakage with older versions of
+  pytest (<= 6.1.2)
+  (`#1028 <https://github.com/agronholm/anyio/issues/1028>`_; PR by @saper)
+- Fixed a rarely occurring ``RuntimeError: Set changed size during iteration`` while
+  shutting down the process pool when using the asyncio backend
+  (`#985 <https://github.com/agronholm/anyio/issues/985>`_)
+
+.. _task call graphs: https://docs.python.org/3/library/asyncio-graph.html
+.. _winloop: https://github.com/Vizonex/Winloop
+
 **4.11.0**
 
 - Added support for cancellation reasons (the ``reason`` parameter to
@@ -44,6 +206,7 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
   * ``ConnectedUNIXDatagramSocket.from_socket()``
 - Added a hierarchy of connectable stream classes for transparently connecting to
   various remote or local endpoints for exchanging bytes or objects
+- Added ``BufferedByteStream``, a full-duplex variant of ``BufferedByteReceiveStream``
 - Added context manager mix-in classes (``anyio.ContextManagerMixin`` and
   ``anyio.AsyncContextManagerMixin``) to help write classes that embed other context
   managers, particularly cancel scopes or task groups

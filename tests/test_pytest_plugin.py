@@ -7,7 +7,7 @@ import pytest
 from _pytest.logging import LogCaptureFixture
 from _pytest.pytester import Pytester
 
-from anyio import get_all_backends
+from anyio import get_available_backends
 from anyio.pytest_plugin import FreePortFactory
 
 pytestmark = [
@@ -24,10 +24,10 @@ def test_plugin(testdir: Pytester) -> None:
     testdir.makeconftest(
         """
         from contextvars import ContextVar
-        import sniffio
         import pytest
 
         from anyio import sleep
+        from anyio._core._eventloop import current_async_library
 
         var = ContextVar("var")
 
@@ -35,7 +35,7 @@ def test_plugin(testdir: Pytester) -> None:
         @pytest.fixture
         async def async_fixture():
             await sleep(0)
-            return sniffio.current_async_library()
+            return current_async_library()
 
 
         @pytest.fixture
@@ -55,10 +55,10 @@ def test_plugin(testdir: Pytester) -> None:
     testdir.makepyfile(
         """
         import pytest
-        import sniffio
         from hypothesis import strategies, given
 
         from anyio import get_all_backends, sleep
+        from anyio._core._eventloop import current_async_library
 
 
         @pytest.mark.anyio
@@ -89,7 +89,7 @@ def test_plugin(testdir: Pytester) -> None:
 
     result = testdir.runpytest(*pytest_args)
     result.assert_outcomes(
-        passed=4 * len(get_all_backends()), skipped=len(get_all_backends())
+        passed=4 * len(get_available_backends()), skipped=len(get_available_backends())
     )
 
 
@@ -146,7 +146,8 @@ def test_asyncio(testdir: Pytester, caplog: LogCaptureFixture) -> None:
 
         class TestClassFixtures:
             @pytest.fixture(scope='class')
-            async def async_class_fixture(self, anyio_backend):
+            @classmethod
+            async def async_class_fixture(cls, anyio_backend):
                 await asyncio.sleep(0)
                 return anyio_backend
 
@@ -216,7 +217,6 @@ def test_autouse_async_fixture(testdir: Pytester) -> None:
         """
         import pytest
 
-        import sniffio
         from anyio import get_all_backends, sleep
 
 
@@ -227,7 +227,7 @@ def test_autouse_async_fixture(testdir: Pytester) -> None:
     )
 
     result = testdir.runpytest_subprocess(*pytest_args)
-    result.assert_outcomes(passed=len(get_all_backends()))
+    result.assert_outcomes(passed=len(get_available_backends()))
 
 
 def test_cancel_scope_in_asyncgen_fixture(testdir: Pytester) -> None:
@@ -254,7 +254,7 @@ def test_cancel_scope_in_asyncgen_fixture(testdir: Pytester) -> None:
     )
 
     result = testdir.runpytest_subprocess(*pytest_args)
-    result.assert_outcomes(passed=len(get_all_backends()))
+    result.assert_outcomes(passed=len(get_available_backends()))
 
 
 def test_module_scoped_task_group_fixture(testdir: Pytester) -> None:
@@ -266,11 +266,11 @@ def test_module_scoped_task_group_fixture(testdir: Pytester) -> None:
             CancelScope,
             create_memory_object_stream,
             create_task_group,
-            get_all_backends,
+            get_available_backends,
         )
 
 
-        @pytest.fixture(scope="module", params=get_all_backends())
+        @pytest.fixture(scope="module", params=get_available_backends())
         def anyio_backend():
             return 'asyncio'
 
@@ -311,7 +311,7 @@ def test_module_scoped_task_group_fixture(testdir: Pytester) -> None:
     )
 
     result = testdir.runpytest_subprocess(*pytest_args)
-    result.assert_outcomes(passed=len(get_all_backends()))
+    result.assert_outcomes(passed=len(get_available_backends()))
 
 
 def test_async_fixture_teardown_after_sync_test(testdir: Pytester) -> None:
@@ -381,7 +381,7 @@ def test_hypothesis_module_mark(testdir: Pytester) -> None:
 
     result = testdir.runpytest(*pytest_args)
     result.assert_outcomes(
-        passed=len(get_all_backends()) + 1, xfailed=len(get_all_backends())
+        passed=len(get_available_backends()) + 1, xfailed=len(get_available_backends())
     )
 
 
@@ -422,11 +422,12 @@ def test_hypothesis_function_mark(testdir: Pytester) -> None:
 
     result = testdir.runpytest(*pytest_args)
     result.assert_outcomes(
-        passed=2 * len(get_all_backends()), xfailed=2 * len(get_all_backends())
+        passed=2 * len(get_available_backends()),
+        xfailed=2 * len(get_available_backends()),
     )
 
 
-@pytest.mark.parametrize("anyio_backend", get_all_backends(), indirect=True)
+@pytest.mark.parametrize("anyio_backend_name", get_available_backends())
 def test_debugger_exit_in_taskgroup(testdir: Pytester, anyio_backend_name: str) -> None:
     testdir.makepyfile(
         f"""
@@ -449,7 +450,7 @@ def test_debugger_exit_in_taskgroup(testdir: Pytester, anyio_backend_name: str) 
     result.assert_outcomes()
 
 
-@pytest.mark.parametrize("anyio_backend", get_all_backends(), indirect=True)
+@pytest.mark.parametrize("anyio_backend_name", get_available_backends())
 def test_keyboardinterrupt_during_test(
     testdir: Pytester, anyio_backend_name: str
 ) -> None:
@@ -476,6 +477,39 @@ def test_keyboardinterrupt_during_test(
     testdir.runpytest_subprocess(*pytest_args, timeout=3)
 
 
+def test_keyboard_interrupt_does_not_resume_test(testdir: Pytester) -> None:
+    # Regression test for #1060
+    testdir.makepyfile(
+        """
+        import asyncio
+        import signal
+
+        import anyio
+        import pytest
+
+        @pytest.fixture
+        def anyio_backend():
+            return "asyncio"
+
+        @pytest.fixture
+        async def myfixture():
+            yield
+
+        @pytest.mark.anyio
+        async def test_keyboard_interrupt(myfixture):
+            loop = asyncio.get_running_loop()
+            loop.call_soon(signal.raise_signal, signal.SIGINT)
+            await anyio.sleep(3600)
+            print("RESUMED_AFTER_INTERRUPT")
+        """
+    )
+
+    result = testdir.runpytest_subprocess(*pytest_args, timeout=5)
+    assert result.ret == 2
+    result.stdout.no_fnmatch_line("*RESUMED_AFTER_INTERRUPT*")
+    result.stdout.fnmatch_lines(["*KeyboardInterrupt*"])
+
+
 def test_async_fixture_in_test_class(testdir: Pytester) -> None:
     # Regression test for #633
     testdir.makepyfile(
@@ -497,7 +531,7 @@ def test_async_fixture_in_test_class(testdir: Pytester) -> None:
     )
 
     result = testdir.runpytest_subprocess(*pytest_args)
-    result.assert_outcomes(passed=len(get_all_backends()))
+    result.assert_outcomes(passed=len(get_available_backends()))
 
 
 def test_asyncgen_fixture_in_test_class(testdir: Pytester) -> None:
@@ -522,31 +556,7 @@ def test_asyncgen_fixture_in_test_class(testdir: Pytester) -> None:
     )
 
     result = testdir.runpytest_subprocess(*pytest_args)
-    result.assert_outcomes(passed=len(get_all_backends()))
-
-
-def test_anyio_fixture_adoption_does_not_persist(testdir: Pytester) -> None:
-    testdir.makepyfile(
-        """
-        import inspect
-        import pytest
-
-        @pytest.fixture
-        async def fixt():
-            return 1
-
-        @pytest.mark.anyio
-        async def test_fixt(fixt):
-            assert fixt == 1
-
-        def test_no_mark(fixt):
-            assert inspect.iscoroutine(fixt)
-            fixt.close()
-        """
-    )
-
-    result = testdir.runpytest(*pytest_args)
-    result.assert_outcomes(passed=len(get_all_backends()) + 1)
+    result.assert_outcomes(passed=len(get_available_backends()))
 
 
 def test_async_fixture_params(testdir: Pytester) -> None:
@@ -566,7 +576,40 @@ def test_async_fixture_params(testdir: Pytester) -> None:
     )
 
     result = testdir.runpytest(*pytest_args)
-    result.assert_outcomes(passed=len(get_all_backends()) * 2)
+    result.assert_outcomes(passed=len(get_available_backends()) * 2)
+
+
+def test_dynamic_async_fixture_access_does_not_hang(testdir: Pytester) -> None:
+    """
+    Test for a situation when an async test or fixture dynamically request an async fixture
+    via request.getfixturevalue() from causing a re-entrant call into the test runner.
+    on trio it will deadlock, on asyncio it raises RuntimeError. This test is to ensure
+    both backends fail with a clear error.
+
+    Regression test for https://github.com/agronholm/anyio/issues/1148
+    """
+    testdir.makepyfile(
+        """
+        import pytest
+
+        @pytest.fixture
+        async def f():
+            return 1
+
+        @pytest.mark.anyio
+        async def test_something(request):
+            value = request.getfixturevalue('f')
+            assert value == 1
+        """
+    )
+
+    result = testdir.runpytest_subprocess(*pytest_args, timeout=3)
+    result.stdout.fnmatch_lines(
+        [
+            "*RuntimeError: Cannot schedule a coroutine in the test runner while another is already running;*"
+        ]
+    )
+    result.assert_outcomes(failed=len(get_available_backends()))
 
 
 def test_auto_mode(testdir: Pytester) -> None:
@@ -591,7 +634,7 @@ def test_auto_mode(testdir: Pytester) -> None:
     )
 
     result = testdir.runpytest(*pytest_args)
-    result.assert_outcomes(passed=len(get_all_backends()))
+    result.assert_outcomes(passed=len(get_available_backends()))
 
 
 def test_auto_mode_conflict_warning(testdir: Pytester) -> None:
@@ -636,7 +679,7 @@ def test_auto_mode_conflict_warning(testdir: Pytester) -> None:
     )
 
     result = testdir.runpytest("-p", "anyio")
-    result.assert_outcomes(passed=len(get_all_backends()))
+    result.assert_outcomes(passed=len(get_available_backends()))
     assert (
         "PytestConfigWarning: AnyIO auto mode has been enabled together with "
         "pytest-asyncio auto mode. This may cause unexpected behavior."
@@ -645,7 +688,8 @@ def test_auto_mode_conflict_warning(testdir: Pytester) -> None:
 
 class TestFreePortFactory:
     @pytest.fixture(scope="class")
-    def families(self) -> Sequence[tuple[socket.AddressFamily, str]]:
+    @classmethod
+    def families(cls) -> Sequence[tuple[socket.AddressFamily, str]]:
         from .test_sockets import has_ipv6
 
         families: list[tuple[socket.AddressFamily, str]] = [
@@ -700,3 +744,52 @@ class TestFreePortFactory:
         for family, addr in families:
             with socket.socket(family, socket.SOCK_DGRAM) as sock:
                 sock.bind((addr, free_udp_port))
+
+
+def test_programmatic_anyio_mark(testdir: Pytester) -> None:
+    """Test that the anyio marker added programmatically via pytest_collection_modifyitems
+    causes the test to be run (regression test for issue #422)."""
+    testdir.makeconftest(
+        """
+        import inspect
+        import pytest
+
+
+        def pytest_collection_modifyitems(session, config, items):
+            for item in items:
+                if (
+                    isinstance(item, pytest.Function)
+                    and inspect.iscoroutinefunction(item.function)
+                ):
+                    item.add_marker(pytest.mark.anyio)
+        """
+    )
+    testdir.makepyfile(
+        """
+        async def test_programmatically_marked():
+            pass
+        """
+    )
+
+    result = testdir.runpytest(*pytest_args)
+    result.assert_outcomes(passed=len(get_available_backends()))
+
+
+def test_func_as_parametrize_param_name(testdir: Pytester) -> None:
+    """
+    Test that "func" can be used as a parameter name in
+    `pytest.mark.parametrize` when using the pytest plugin.
+    """
+    testdir.makepyfile(
+        """
+        import pytest
+
+        @pytest.mark.parametrize("func", [1])
+        @pytest.mark.anyio
+        async def test_func_as_parametrize_param_name(func: int) -> None:
+            pass
+        """
+    )
+
+    result = testdir.runpytest(*pytest_args)
+    result.assert_outcomes(passed=len(get_available_backends()))
