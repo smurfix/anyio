@@ -7,7 +7,7 @@ import pytest
 from _pytest.logging import LogCaptureFixture
 from _pytest.pytester import Pytester
 
-from anyio import get_all_backends, get_available_backends
+from anyio import get_available_backends
 from anyio.pytest_plugin import FreePortFactory
 
 pytestmark = [
@@ -146,7 +146,8 @@ def test_asyncio(testdir: Pytester, caplog: LogCaptureFixture) -> None:
 
         class TestClassFixtures:
             @pytest.fixture(scope='class')
-            async def async_class_fixture(self, anyio_backend):
+            @classmethod
+            async def async_class_fixture(cls, anyio_backend):
                 await asyncio.sleep(0)
                 return anyio_backend
 
@@ -426,7 +427,7 @@ def test_hypothesis_function_mark(testdir: Pytester) -> None:
     )
 
 
-@pytest.mark.parametrize("anyio_backend", get_available_backends(), indirect=True)
+@pytest.mark.parametrize("anyio_backend_name", get_available_backends())
 def test_debugger_exit_in_taskgroup(testdir: Pytester, anyio_backend_name: str) -> None:
     testdir.makepyfile(
         f"""
@@ -449,7 +450,7 @@ def test_debugger_exit_in_taskgroup(testdir: Pytester, anyio_backend_name: str) 
     result.assert_outcomes()
 
 
-@pytest.mark.parametrize("anyio_backend", get_all_backends(), indirect=True)
+@pytest.mark.parametrize("anyio_backend_name", get_available_backends())
 def test_keyboardinterrupt_during_test(
     testdir: Pytester, anyio_backend_name: str
 ) -> None:
@@ -578,6 +579,39 @@ def test_async_fixture_params(testdir: Pytester) -> None:
     result.assert_outcomes(passed=len(get_available_backends()) * 2)
 
 
+def test_dynamic_async_fixture_access_does_not_hang(testdir: Pytester) -> None:
+    """
+    Test for a situation when an async test or fixture dynamically request an async fixture
+    via request.getfixturevalue() from causing a re-entrant call into the test runner.
+    on trio it will deadlock, on asyncio it raises RuntimeError. This test is to ensure
+    both backends fail with a clear error.
+
+    Regression test for https://github.com/agronholm/anyio/issues/1148
+    """
+    testdir.makepyfile(
+        """
+        import pytest
+
+        @pytest.fixture
+        async def f():
+            return 1
+
+        @pytest.mark.anyio
+        async def test_something(request):
+            value = request.getfixturevalue('f')
+            assert value == 1
+        """
+    )
+
+    result = testdir.runpytest_subprocess(*pytest_args, timeout=3)
+    result.stdout.fnmatch_lines(
+        [
+            "*RuntimeError: Cannot schedule a coroutine in the test runner while another is already running;*"
+        ]
+    )
+    result.assert_outcomes(failed=len(get_available_backends()))
+
+
 def test_auto_mode(testdir: Pytester) -> None:
     testdir.makepyprojecttoml(
         """
@@ -654,7 +688,8 @@ def test_auto_mode_conflict_warning(testdir: Pytester) -> None:
 
 class TestFreePortFactory:
     @pytest.fixture(scope="class")
-    def families(self) -> Sequence[tuple[socket.AddressFamily, str]]:
+    @classmethod
+    def families(cls) -> Sequence[tuple[socket.AddressFamily, str]]:
         from .test_sockets import has_ipv6
 
         families: list[tuple[socket.AddressFamily, str]] = [

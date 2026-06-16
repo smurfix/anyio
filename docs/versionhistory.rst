@@ -3,8 +3,9 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
-**UNRELEASED**
+**4.14.0**
 
+- Added support for Python 3.15
 - Added an asynchronous implementation of the ``itertools`` module
   (`#998 <https://github.com/agronholm/anyio/issues/998>`_; PR by @11kkw)
 - Added the ``local_port`` parameter to ``connect_tcp()`` to allow binding to a
@@ -12,8 +13,12 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
   (`#1067 <https://github.com/agronholm/anyio/issues/1067>`_; PR by @nullwiz)
 - Added support for custom capacity limiters in async path and file I/O
   functions and classes
-- Added the ``create_task()`` task group method for easier asyncio migration
-  and to allow retrieving task return values more easily
+- Added the ``create_task()`` task group method for easier asyncio migration (returns a
+  ``TaskHandle``)
+  (`#1098 <https://github.com/agronholm/anyio/pull/1098>`_)
+- Changed ``TaskGroup.start_soon()`` to return a ``TaskHandle``
+- Added an option for ``TaskGroup.start()`` to return a ``TaskHandle`` (which then
+  contains the start value in the ``start_value`` property)
 - Added the ``cancel()`` convenience method to ``TaskGroup`` as a shortcut for
   cancelling the task group's cancel scope
 - Improved the error message when a known backend is not installed to suggest the
@@ -26,6 +31,28 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
   any ``ReadableBuffer``, thus allowing it to accept ``bytearray`` and ``memoryview`` to
   match ``pathlib.Path.write_bytes()``
   (`#1135 <https://github.com/agronholm/anyio/issues/1135>`_; PR by @SAY-5)
+- Changed several type annotations to only accept callables returning coroutine-like
+  objects instead of arbitrary awaitables:
+
+  - ``TaskGroup.start_soon()``
+  - ``TaskGroup.start()``
+  - ``anyio.from_thread.run()``
+
+  This reverts an earlier change from v3.7.0 which was made in error.
+  (`#1153 <https://github.com/agronholm/anyio/pull/1153>`_)
+- Changed ``anyio.run`` to support callables returning arbitrary awaitables at runtime
+  on all backends. Previously, this only worked on asyncio (`#1171
+  <https://github.com/agronholm/anyio/pull/1171>`_; PR by @gschaffner)
+- Changed several classes (and their subclasses) to have ``__slots__`` (with
+  ``__weakref__``):
+
+  * ``anyio.CancelScope``
+  * ``anyio.CapacityLimiter``
+  * ``anyio.Condition``
+  * ``anyio.Event``
+  * ``anyio.Lock``
+  * ``anyio.ResourceGuard``
+  * ``anyio.Semaphore``
 - Fixed cancellation exception escaping a cancel scope when triggered via
   ``check_cancelled()`` in a worker thread
   (`#1113 <https://github.com/agronholm/anyio/issues/1113>`_)
@@ -46,6 +73,20 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 - Fixed ``UDPSocket.aclose()`` and ``ConnectedUDPSocket.aclose()`` on asyncio returning
   before the underlying socket FD was actually released
   (`#1147 <https://github.com/agronholm/anyio/pull/1147>`_; PR by @matias-arrelid)
+- Fixed trio backend test runner hanging indefinitely instead of raising an error
+  when dynamically accessing an async fixture via ``request.getfixturevalue``
+  (`#1148 <https://github.com/agronholm/anyio/issues/1148>`_; PR by @EmmanuelNiyonshuti)
+- Fixed cancelling tasks started through a ``BlockingPortal`` after the portal has been
+  stopped
+  (`#1013 <https://github.com/agronholm/anyio/issues/1013>`_; PR by @puneetdixit200)
+- Fixed ``backend_options`` being ignored when running the Trio backend via
+  ``anyio.run()``; the options are now passed as keyword arguments to ``trio.run()``
+  again, as documented (a regression from AnyIO 3)
+  (`#1161 <https://github.com/agronholm/anyio/pull/1161>`_; PR by @Zac-HD)
+- Fixed asyncio ``Lock`` and ``Semaphore`` deadlocks caused by cancelled waiters
+  left queued during release
+  (`#1145 <https://github.com/agronholm/anyio/pull/1145>`_; PR by @rasmusfaber,
+  @x42005e1f and @agronholm)
 
 **4.13.0**
 
