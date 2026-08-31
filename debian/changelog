@@ -1,3 +1,9 @@
+anyio (4.14.2.2) smurf; urgency=medium
+
+  * Tempdir cleanup
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Mon, 31 Aug 2026 11:36:11 +0200
+
 anyio (4.14.2.1) smurf; urgency=medium
 
   * Merge
