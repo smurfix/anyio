@@ -1,3 +1,9 @@
+anyio (4.14.2.1) smurf; urgency=medium
+
+  * Merge
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Mon, 31 Aug 2026 11:16:17 +0200
+
 anyio (4.14.0.1) smurf; urgency=medium
 
   * Merge

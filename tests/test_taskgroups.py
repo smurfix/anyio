@@ -15,6 +15,7 @@ from unittest import mock
 
 import pytest
 from pytest import FixtureRequest, MonkeyPatch
+from pytest_mock import MockerFixture
 
 import anyio
 from anyio import (
@@ -358,6 +359,41 @@ async def test_cancel_with_nested_task_groups() -> None:
                 tg.cancel_scope.cancel()
 
     assert len(outer_cancel_spy.call_args_list) < 10
+
+
+@pytest.mark.parametrize("anyio_backend", asyncio_params)
+async def test_no_spin_on_done_task_in_cancel_scope(mocker: MockerFixture) -> None:
+    """Regression test for #1111.
+
+    When a task group is entered but never exited (e.g. it is abandoned because
+    the task owning it finishes without unwinding it), its cancel scope is left
+    with the now-finished host task still in its set of contained tasks.
+    Cancelling such a scope used to make ``_deliver_cancellation`` treat that
+    finished task as still cancellable and reschedule itself via ``call_soon``
+    forever, pinning the event loop at 100% CPU.
+    """
+    from anyio._backends import _asyncio
+
+    # To allow the mocker to override a @final class
+    class EditableCancelScope(_asyncio.CancelScope):
+        pass
+
+    async def owner() -> EditableCancelScope:
+        return cast(EditableCancelScope, EditableCancelScope().__enter__())
+
+    scope = await asyncio.create_task(owner())
+    spy = mocker.spy(scope, "_deliver_cancellation")
+    scope.cancel()
+
+    # Give any rescheduled _deliver_cancellation callbacks the chance to fire.
+    # With the bug present this reschedules forever (the test timeout would
+    # trip); the fix leaves no pending cancellation callback since the only
+    # remaining task is done.
+    for _ in range(5):
+        await checkpoint()
+
+    assert scope._cancel_handle is None
+    spy.assert_called_once()
 
 
 @pytest.mark.parametrize("return_handle", [False, True])
@@ -2006,6 +2042,33 @@ async def test_cancel_reason() -> None:
     assert task and task.name
     exc_info.match("test reason")
     exc_info.match(task.name)
+
+
+async def test_cancel_shielding_start() -> None:
+    """
+    Test that if the host task that has spawned a subtask via ``start()`` is cancelled,
+    a shielded cancel scope in the child task will shield it from cancellation.
+
+    Regression test for #837.
+    """
+
+    async def taskfunc(*, task_status: TaskStatus[None]) -> None:
+        with CancelScope(shield=True):
+            try:
+                await resume_event.wait()
+            except get_cancelled_exc_class():
+                pytest.fail("Shouldn't be cancelled in a shielded scope")
+
+        # The cancellation should be triggered here, and not any earlier
+        await checkpoint()
+
+    resume_event = Event()
+    with CancelScope() as outer_scope:
+        async with create_task_group() as tg:
+            tg.start_soon(tg.start, taskfunc)
+            await wait_all_tasks_blocked()
+            outer_scope.cancel()
+            resume_event.set()
 
 
 @pytest.mark.parametrize(
