@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import sys
 from contextlib import AbstractContextManager
 from typing import Any
@@ -9,6 +10,7 @@ import pytest
 
 from anyio import (
     CancelScope,
+    CapacityLimiter,
     Condition,
     Event,
     Lock,
@@ -21,7 +23,7 @@ from anyio import (
     to_thread,
     wait_all_tasks_blocked,
 )
-from anyio.abc import CapacityLimiter, TaskStatus
+from anyio.abc import TaskStatus
 from anyio.lowlevel import checkpoint
 
 from .conftest import asyncio_params
@@ -205,7 +207,7 @@ class TestLock:
         statistics = lock.statistics()
         assert statistics.owner
         assert statistics.owner.name == "task1"
-        await asyncio.wait([task1], timeout=1)
+        await asyncio.wait([task1], timeout=5)
 
         # The acquire() method should've released the semaphore because acquisition
         # failed due to cancellation
@@ -665,7 +667,7 @@ class TestSemaphore:
         semaphore.release()
         task1.cancel()
         assert semaphore.value == 0
-        await asyncio.wait([task1], timeout=1)
+        await asyncio.wait([task1], timeout=5)
 
         # The acquire() method should've released the semaphore because acquisition
         # failed due to cancellation
@@ -920,6 +922,27 @@ class TestCapacityLimiter:
             backend_options=anyio_backend_options,
         )
 
+    def test_zero_tokens_outside_event_loop(self) -> None:
+        # Regression test for the CapacityLimiterAdapter setter rejecting 0,
+        # which contradicted the 4.12 behavior of allowing 0 total tokens
+        limiter = CapacityLimiter(1)
+        limiter.total_tokens = 0
+        assert limiter.total_tokens == 0
+        assert CapacityLimiter(0).total_tokens == 0
+
+    def test_float_infinity_outside_event_loop(self) -> None:
+        # Regression test: the CapacityLimiterAdapter setter checked for
+        # infinity with the identity operator (``value is not math.inf``), so
+        # ``float("inf")`` -- a distinct object that merely equals ``math.inf``
+        # -- was rejected outside an event loop, while every backend setter
+        # (which uses ``math.isinf``) accepts it.
+        assert CapacityLimiter(float("inf")).total_tokens == math.inf
+        assert CapacityLimiter(math.inf).total_tokens == math.inf
+
+        limiter = CapacityLimiter(1)
+        limiter.total_tokens = float("inf")
+        assert limiter.total_tokens == math.inf
+
     async def test_total_tokens_as_kwarg(self) -> None:
         # Regression test for #515
         limiter = CapacityLimiter(total_tokens=1)
@@ -953,3 +976,48 @@ class TestCapacityLimiter:
             tg.cancel_scope.cancel()
 
         pytest.fail("The second borrower failed to acquire the limiter")
+
+    async def test_acquire_nowait(self) -> None:
+        async def borrower() -> None:
+            limiter.acquire_nowait()
+
+        limiter = CapacityLimiter(1)
+        limiter.acquire_nowait()
+        with pytest.RaisesGroup(pytest.RaisesExc(WouldBlock)):
+            async with create_task_group() as tg:
+                tg.start_soon(borrower)
+
+    async def test_acquire_on_behalf_of_nowait(self) -> None:
+        borrower1, borrower2 = object(), object()
+        limiter = CapacityLimiter(1)
+        limiter.acquire_on_behalf_of_nowait(borrower1)
+        with pytest.raises(WouldBlock):
+            limiter.acquire_on_behalf_of_nowait(borrower2)
+
+    async def test_nowait_acquire_after_release_does_not_oversubscribe(self) -> None:
+        # Regression test for #1170: a non-blocking acquire issued in the window
+        # between releasing a token (which notifies the next waiter) and that
+        # waiter actually resuming must not slip through, as the freed token is
+        # already reserved for the woken waiter. The over-granting bug was
+        # specific to the asyncio backend, but the invariant holds on both.
+        limiter = CapacityLimiter(1)
+        limiter.acquire_on_behalf_of_nowait("A")
+
+        async def waiter() -> None:
+            await limiter.acquire_on_behalf_of("B")
+
+        async with create_task_group() as tg:
+            tg.start_soon(waiter)
+            await wait_all_tasks_blocked()
+            assert limiter.statistics().tasks_waiting == 1
+
+            # Frees the only token and reserves it for the still-parked "B"; no
+            # token is available, so the nowait acquire must raise WouldBlock.
+            limiter.release_on_behalf_of("A")
+            with pytest.raises(WouldBlock):
+                limiter.acquire_on_behalf_of_nowait("X")
+
+        assert limiter.borrowed_tokens <= limiter.total_tokens
+        assert limiter.available_tokens >= 0
+        assert limiter.statistics().borrowers == ("B",)
+        limiter.release_on_behalf_of("B")

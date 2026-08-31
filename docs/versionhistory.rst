@@ -3,6 +3,61 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
+**4.14.2**
+
+- Changed ``ByteReceiveStream.receive()`` implementations to raise a ``ValueError`` when
+  ``max_bytes`` is not a positive integer
+  (`#1191 <https://github.com/agronholm/anyio/pull/1191>`_)
+- Fixed ``CapacityLimiter.total_tokens`` rejecting ``float("inf")`` when the limiter was
+  instantiated outside of an event loop. The adapter setter checked for infinity by
+  identity (``value is math.inf``), so only the exact ``math.inf`` singleton was accepted,
+  while every backend setter (using ``math.isinf()``) accepts any positive infinity
+  (`#1189 <https://github.com/agronholm/anyio/pull/1189>`_; PR by @greymoth-jp).
+- Fixed ``to_process.run_sync()`` deadlocking when the worker function writes enough data
+  to ``sys.stderr`` to fill the (undrained) pipe buffer. The worker process now redirects
+  ``sys.stderr`` to ``os.devnull`` as well, matching the documented behavior
+- Fixed ``TLSStream.wrap()`` matching an internationalized (unicode) host name against
+  the peer certificate using IDNA 2003 (via the standard library) instead of IDNA 2008,
+  which could cause the host name to be matched against the wrong certificate
+  (`#1208 <https://github.com/agronholm/anyio/pull/1208>`_)
+- Fixed ``anyio.open_process()`` (and ``run_process()``) ignoring the ``extra_groups``
+  argument, as it mistakenly passed the value of the ``group`` argument instead
+  (`#1209 <https://github.com/agronholm/anyio/pull/1209>`_)
+- Fixed ``CapacityLimiter.acquire_nowait()`` and
+  ``CapacityLimiter.acquire_nowait_on_behalf_of()`` raising ``trio.WouldBlock`` instead
+  of ``anyio.WouldBlock`` on the ``trio`` backend when there are no tokens available
+  (`#1218 <https://github.com/agronholm/anyio/pull/1218>`_)
+- Fixed ``CapacityLimiter`` on the asyncio backend over-granting tokens
+  (``borrowed_tokens`` exceeding ``total_tokens`` and ``available_tokens`` going
+  negative) when a non-blocking acquire was made in the window between a token
+  being released and the notified waiter resuming. The freed token is now
+  reserved for the woken waiter right away, so the non-blocking acquire correctly
+  raises ``WouldBlock``
+  (`#1170 <https://github.com/agronholm/anyio/issues/1170>`_; PR by @gaoflow)
+- Fixed unnecessary CPU spin when delivering cancellation from ``CancelScope`` on
+  asyncio under certain conditions, including improper cancel scope nesting
+  (`#1111 <https://github.com/agronholm/anyio/issues/1111>`_)
+
+**4.14.1**
+
+- Fixed teardown of higher-scoped async fixtures failing on asyncio with
+  ``RuntimeError: Attempted to exit cancel scope in a different task than it was entered in``
+  when an async test raise an outcome exception (e.g., ``pytest.skip()``, ``pytest.xfail()``,
+  or ``pytest.fail()``)
+  (`#1179 <https://github.com/agronholm/anyio/issues/1179>`_; PR by @EmmanuelNiyonshuti)
+- Fixed ``CapacityLimiter.total_tokens`` rejecting a value of ``0`` when the limiter was
+  instantiated outside of an event loop, contradicting the documented behavior of
+  allowing 0 total tokens
+  (`#1183 <https://github.com/agronholm/anyio/pull/1183>`_; PR by @nyxst4ck)
+- Fixed ``Process.wait()`` on asyncio waiting for stdout/stderr kept open (e.g.
+  if a grandchild inherited it), instead of returning once the process exits
+  like the other backends do
+  (`#1174 <https://github.com/agronholm/anyio/issues/1174>`_; PR by @tapetersen)
+- Fixed ``Process.aclose()`` deadlocking on the asyncio backend when the subprocess is
+  blocked on writing to a stdout or stderr pipe whose buffer is full; closing the
+  process's standard streams now also closes the underlying pipe transports
+  (`#1166 <https://github.com/agronholm/anyio/issues/1166>`_; PR by @tapetersen)
+
 **4.14.0**
 
 - Added support for Python 3.15
