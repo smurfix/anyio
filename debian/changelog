@@ -1,3 +1,10 @@
+anyio (4.16.0.1) smurf; urgency=medium
+
+  * Merge
+  * Prevent hang
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Fri, 27 Nov 2026 14:27:38 +0100
+
 anyio (4.14.2.2) smurf; urgency=medium
 
   * Tempdir cleanup
