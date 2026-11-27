@@ -32,7 +32,9 @@ Timeouts and cancellation
 -------------------------
 
 .. autofunction:: anyio.move_on_after
+.. autofunction:: anyio.move_on_at
 .. autofunction:: anyio.fail_after
+.. autofunction:: anyio.fail_at
 .. autofunction:: anyio.current_effective_deadline
 
 .. autoclass:: anyio.CancelScope
@@ -192,6 +194,7 @@ Synchronization
 ---------------
 
 .. autoclass:: anyio.Event
+.. autoclass:: anyio.Future
 .. autoclass:: anyio.Lock
 .. autoclass:: anyio.Condition
 .. autoclass:: anyio.Semaphore
@@ -276,6 +279,10 @@ Exceptions
 .. autoexception:: anyio.ConnectionFailed
 .. autoexception:: anyio.DelimiterNotFound
 .. autoexception:: anyio.EndOfStream
+.. autoexception:: anyio.FutureAlreadyFinished
+.. autoexception:: anyio.FutureCancelled
+.. autoexception:: anyio.FutureFailed
+.. autoexception:: anyio.FutureNotFinished
 .. autoexception:: anyio.IncompleteRead
 .. autoexception:: anyio.NoEventLoopError
 .. autoexception:: anyio.RunFinishedError
@@ -284,3 +291,10 @@ Exceptions
 .. autoexception:: anyio.TaskNotFinished
 .. autoexception:: anyio.TypedAttributeLookupError
 .. autoexception:: anyio.WouldBlock
+
+Concurrency utilities
+---------------------
+
+.. autofunction:: anyio.amap
+.. autofunction:: anyio.as_completed
+.. autofunction:: anyio.gather

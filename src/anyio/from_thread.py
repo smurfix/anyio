@@ -17,6 +17,7 @@ from contextlib import (
     AbstractContextManager,
     contextmanager,
 )
+from contextvars import Context
 from dataclasses import dataclass, field
 from functools import partial
 from inspect import isawaitable
@@ -35,16 +36,16 @@ from ._core._eventloop import (
     threadlocals,
 )
 from ._core._eventloop import run as run_eventloop
-from ._core._exceptions import NoEventLoopError
+from ._core._exceptions import NoEventLoopError, RunFinishedError
 from ._core._synchronization import Event
 from ._core._tasks import CancelScope, create_task_group
 from .abc._tasks import TaskStatus
 from .lowlevel import EventLoopToken, current_token
 
 if sys.version_info >= (3, 11):
-    from typing import TypeVarTuple, Unpack
+    from typing import Self, TypeVarTuple, Unpack
 else:
-    from typing_extensions import TypeVarTuple, Unpack
+    from typing_extensions import Self, TypeVarTuple, Unpack
 
 T_Retval = TypeVar("T_Retval")
 T_co = TypeVar("T_co", covariant=True)
@@ -120,7 +121,7 @@ def run_sync(
     )
 
 
-class _BlockingAsyncContextManager(Generic[T_co], AbstractContextManager):
+class _BlockingAsyncContextManager(AbstractContextManager, Generic[T_co]):
     _enter_future: Future[T_co]
     _exit_future: Future[bool | None]
     _exit_event: Event
@@ -165,11 +166,12 @@ class _BlockingAsyncContextManager(Generic[T_co], AbstractContextManager):
 
     def __exit__(
         self,
-        __exc_type: type[BaseException] | None,
-        __exc_value: BaseException | None,
-        __traceback: TracebackType | None,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+        /,
     ) -> bool | None:
-        self._exit_exc_info = __exc_type, __exc_value, __traceback
+        self._exit_exc_info = exc_type, exc_value, traceback
         self._portal.call(self._exit_event.set)
         return self._exit_future.result()
 
@@ -196,7 +198,7 @@ class BlockingPortal:
         self._stop_event = Event()
         self._task_group = create_task_group()
 
-    async def __aenter__(self) -> BlockingPortal:
+    async def __aenter__(self) -> Self:
         await self._task_group.__aenter__()
         return self
 
@@ -251,9 +253,16 @@ class BlockingPortal:
                 if event_loop_thread_id == get_ident():
                     scope.cancel("the future was cancelled")
                 elif event_loop_thread_id is not None:
-                    run_sync(
-                        scope.cancel, "the future was cancelled", token=self._token
-                    )
+                    try:
+                        self._token.backend_class.run_sync_soon(
+                            scope.cancel,
+                            ("the future was cancelled",),
+                            self._token.native_token,
+                        )
+                    except RunFinishedError:
+                        # The target event loop is gone, so there's nothing left to
+                        # cancel or notify
+                        pass
 
         try:
             retval_or_awaitable = func(*args, **kwargs)
@@ -267,14 +276,14 @@ class BlockingPortal:
             future.cancel()
             future.set_running_or_notify_cancel()
         except BaseException as exc:
-            if not future.cancelled():
+            if future.set_running_or_notify_cancel():
                 future.set_exception(exc)
 
             # Let base exceptions fall through
             if not isinstance(exc, Exception):
                 raise
         else:
-            if not future.cancelled():
+            if future.set_running_or_notify_cancel():
                 future.set_result(retval)
         finally:
             scope = None  # type: ignore[assignment]
@@ -336,6 +345,100 @@ class BlockingPortal:
 
         """
         return cast(T_Retval, self.start_task_soon(func, *args).result())
+
+    @overload
+    async def call_async(
+        self,
+        func: Callable[[Unpack[PosArgsT]], Awaitable[T_Retval]],
+        *args: Unpack[PosArgsT],
+        abandon_on_cancel: bool = False,
+    ) -> T_Retval: ...
+
+    @overload
+    async def call_async(
+        self,
+        func: Callable[[Unpack[PosArgsT]], T_Retval],
+        *args: Unpack[PosArgsT],
+        abandon_on_cancel: bool = False,
+    ) -> T_Retval: ...
+
+    async def call_async(
+        self,
+        func: Callable[[Unpack[PosArgsT]], Awaitable[T_Retval] | T_Retval],
+        *args: Unpack[PosArgsT],
+        abandon_on_cancel: bool = False,
+    ) -> T_Retval:
+        """
+        Call the given function in the portal's event loop from another event loop.
+
+        If the callable returns an awaitable, it is awaited on. Cancelling the calling
+        task cancels the task running in the portal.
+
+        :param func: any callable
+        :param abandon_on_cancel: if ``False``, wait for the cancelled task to finish
+            and propagate any exception raised during cleanup, or otherwise re-raise
+            the caller's cancellation; if ``True``, stop waiting immediately and ignore
+            the task's subsequent return value or exception
+        :raises RuntimeError: if the portal is not running or if this method is called
+            from within the portal's event loop thread
+
+        .. versionadded:: 4.16.0
+        """
+        self._check_running()
+        source_token = current_token()
+        event = Event()
+        future: Future[T_Retval] = Future()
+        cancellation: Future[None] = Future()
+
+        async def run_call() -> None:
+            with CancelScope() as scope:
+
+                def cancel_target(_: Future[None]) -> None:
+                    try:
+                        self._token.backend_class.run_sync_soon(
+                            scope.cancel,
+                            ("the calling task was cancelled",),
+                            self._token.native_token,
+                        )
+                    except RunFinishedError:
+                        pass
+
+                cancellation.add_done_callback(cancel_target)
+                await self._call_func(func, args, {}, future)
+
+        def notify_source(_: Future[T_Retval]) -> None:
+            try:
+                source_token.backend_class.run_sync_soon(
+                    event.set, (), source_token.native_token
+                )
+            except RunFinishedError:
+                pass
+
+        def spawn_task() -> None:
+            try:
+                self._task_group.start_soon(run_call)
+            except BaseException as exc:
+                if not future.done():
+                    future.set_exception(exc)
+
+        future.add_done_callback(notify_source)
+        self._token.backend_class.run_sync_soon(
+            spawn_task, (), self._token.native_token
+        )
+        try:
+            await event.wait()
+        except get_cancelled_exc_class():
+            cancellation.cancel()
+            if not abandon_on_cancel:
+                with CancelScope(shield=True):
+                    await event.wait()
+
+                if not future.cancelled():
+                    future.result()
+
+            raise
+
+        return future.result()
 
     @overload
     def start_task_soon(
@@ -472,10 +575,10 @@ class BlockingPortalProvider:
     def __enter__(self) -> BlockingPortal:
         with self._lock:
             if self._portal_cm is None:
-                self._portal_cm = start_blocking_portal(
-                    self.backend, self.backend_options
-                )
-                self._portal = self._portal_cm.__enter__()
+                portal_cm = start_blocking_portal(self.backend, self.backend_options)
+                portal = portal_cm.__enter__()
+                self._portal_cm = portal_cm
+                self._portal = portal
 
             self._leases += 1
             return self._portal
@@ -497,7 +600,7 @@ class BlockingPortalProvider:
                 del self._portal
 
         if portal_cm:
-            portal_cm.__exit__(None, None, None)
+            portal_cm.__exit__(exc_type, exc_val, exc_tb)
 
 
 @contextmanager
@@ -541,7 +644,11 @@ def start_blocking_portal(
                     future.set_exception(exc)
 
     future: Future[BlockingPortal] = Future()
-    thread = Thread(target=run_blocking_portal, daemon=True, name=name)
+    kwargs: dict[str, Any] = {}
+    if sys.version_info >= (3, 14):
+        kwargs["context"] = Context()
+
+    thread = Thread(target=run_blocking_portal, daemon=True, name=name, **kwargs)
     thread.start()
     try:
         cancel_remaining_tasks = False
